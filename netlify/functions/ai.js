@@ -31,7 +31,7 @@ exports.handler = async (event) => {
     }
     const data = await res.json();
     const text = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || "";
-    return { statusCode: 200, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: [{ type: "text", text }], _debug: data }) };
+    return { statusCode: 200, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: [{ type: "text", text }] }) };
   } catch (e) {
     return { statusCode: 502, body: JSON.stringify({ error: { message: String(e) } }) };
   }
