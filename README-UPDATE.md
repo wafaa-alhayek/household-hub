@@ -6,18 +6,12 @@
 3. Open the link on each phone **once while online**. From then on it opens with no internet too.
    - iPhone: Safari → Share → Add to Home Screen.  Android: Chrome → menu → Install app / Add to Home Screen.
 
-## AI key — do this ONCE, on one phone
-المزيد → 🤖 المساعد الذكي → paste the key → keep "مشاركته مع العائلة" ticked → حفظ.
-It syncs to the other phones through Firebase. Then press **🧪 اختبار المساعد** — it will say ✅ or tell you exactly what's wrong.
-Most likely "wrong": no prepaid credit. Add ~$5 at https://console.anthropic.com → Billing.
-
-## Optional: hide the key on the server (recommended once things work)
-This folder already contains `netlify/functions/ai.js`. To activate it:
-1. Netlify → your site → **Site configuration → Environment variables → Add a variable**
-   Key: `ANTHROPIC_API_KEY`   Value: your key. Save.
-2. Netlify → **Deploys → Trigger deploy** (or drag the folder again).
-3. In the app, المزيد → 🤖 should now show "يشتغل عبر الخادم ✅". You can then delete the key from the phones.
-If Netlify's drag-and-drop doesn't pick up the function (rare), the app just keeps using the shared key — nothing breaks.
+## AI — no key needed
+This site uses Netlify's built-in **AI Gateway**, which is on by default on Netlify's free plan and needs no API key from you at all. `netlify/functions/ai.js` picks it up automatically the moment the site has a production deploy.
+- Don't add an `ANTHROPIC_API_KEY` environment variable in Netlify — that overrides and disables the Gateway.
+- After the first production deploy, give it a couple of minutes, then in the app go to المزيد → 🤖 المساعد الذكي → press **🧪 اختبار المساعد**. It should say ✅.
+- If it still fails after a few minutes, redeploy once (Netlify → Deploys → Trigger deploy) — the Gateway only activates after a production deploy exists.
+- The "paste your own key" fields under 🤖 المساعد الذكي still exist as a manual fallback (e.g. if AI features are disabled for the team), but shouldn't be needed.
 
 ## What changed in v2
 - ☀️ اليوم tab: my tasks for today as big checkboxes, streak (current / longest / total), 16-week activity heatmap, weekly leaderboard, pending messages, shopping count.
