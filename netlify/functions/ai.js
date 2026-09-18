@@ -1,25 +1,37 @@
-// Proxies chat requests to Anthropic via Netlify's built-in AI Gateway.
-// Netlify auto-injects ANTHROPIC_API_KEY + ANTHROPIC_BASE_URL into this function
-// at runtime (once the site has a production deploy) — no API key ever stored
-// on a phone. Do NOT set ANTHROPIC_API_KEY yourself in Site configuration ->
-// Environment variables: that overrides the Gateway's key and breaks this.
+// Proxies chat requests to a free model on OpenRouter (openrouter.ai), using the
+// existing AI_API_KEY environment variable already set in Netlify (Site
+// configuration -> Environment variables). No cost: FREE_MODEL below has the
+// ":free" suffix, which OpenRouter serves at no charge.
+//
+// The frontend (index.html -> callAI) sends/expects Anthropic-shaped JSON
+// ({model, max_tokens, system, messages} in / {content:[{type:"text",text}]}
+// out) so this function translates to/from OpenRouter's OpenAI-compatible
+// format. Change FREE_MODEL to swap models; see https://openrouter.ai/models?max_price=0
+// for the current list of ":free" options.
+const FREE_MODEL = "deepseek/deepseek-v4-flash-0731:free";
+
 exports.handler = async (event) => {
-  const key = process.env.ANTHROPIC_API_KEY;
-  const baseUrl = process.env.ANTHROPIC_BASE_URL;
-  const ready = !!(key && baseUrl);
+  const key = process.env.AI_API_KEY;
   if (event.httpMethod === "GET") {
-    return { statusCode: ready ? 200 : 503, body: ready ? "ok" : "AI Gateway not active yet" };
+    return { statusCode: key ? 200 : 503, body: key ? "ok" : "AI_API_KEY not set on server" };
   }
   if (event.httpMethod !== "POST") return { statusCode: 405, body: "Method not allowed" };
-  if (!ready) return { statusCode: 503, body: JSON.stringify({ error: { message: "AI Gateway not active yet — needs a production deploy, then a few minutes" } }) };
+  if (!key) return { statusCode: 503, body: JSON.stringify({ error: { message: "AI_API_KEY not set on server" } }) };
   try {
-    const res = await fetch(`${baseUrl}/v1/messages`, {
+    const { system, messages, max_tokens } = JSON.parse(event.body || "{}");
+    const orMessages = system ? [{ role: "system", content: system }, ...(messages || [])] : (messages || []);
+    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
-      body: event.body
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
+      body: JSON.stringify({ model: FREE_MODEL, messages: orMessages, max_tokens: max_tokens || 600 })
     });
-    const text = await res.text();
-    return { statusCode: res.status, headers: { "Content-Type": "application/json" }, body: text };
+    if (!res.ok) {
+      const text = await res.text();
+      return { statusCode: res.status, headers: { "Content-Type": "application/json" }, body: text };
+    }
+    const data = await res.json();
+    const text = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || "";
+    return { statusCode: 200, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: [{ type: "text", text }] }) };
   } catch (e) {
     return { statusCode: 502, body: JSON.stringify({ error: { message: String(e) } }) };
   }

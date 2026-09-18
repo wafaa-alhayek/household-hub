@@ -1,17 +1,15 @@
 # بيت العائلة — v2 deploy folder
 
-## What to do (5 minutes)
-1. Open `index.html` in a text editor. Near the top, in the boxed FIREBASE CONFIG block, replace the six `PASTE_…` values with yours (same values as before — Firebase Console → ⚙️ Project settings → Your apps). Only the six lines; nothing else.
-2. Go to https://app.netlify.com → your site → **Deploys** → drag **this whole folder** (not just index.html) onto the page. Wait ~30s.
-3. Open the link on each phone **once while online**. From then on it opens with no internet too.
+## What to do
+1. This repo is linked to Netlify: push to `main` and it auto-deploys in ~30-60s. No more dragging folders.
+2. Open the link on each phone **once while online**. From then on it opens with no internet too.
    - iPhone: Safari → Share → Add to Home Screen.  Android: Chrome → menu → Install app / Add to Home Screen.
 
-## AI — no key needed
-This site uses Netlify's built-in **AI Gateway**, which is on by default on Netlify's free plan and needs no API key from you at all. `netlify/functions/ai.js` picks it up automatically the moment the site has a production deploy.
-- Don't add an `ANTHROPIC_API_KEY` environment variable in Netlify — that overrides and disables the Gateway.
-- After the first production deploy, give it a couple of minutes, then in the app go to المزيد → 🤖 المساعد الذكي → press **🧪 اختبار المساعد**. It should say ✅.
-- If it still fails after a few minutes, redeploy once (Netlify → Deploys → Trigger deploy) — the Gateway only activates after a production deploy exists.
-- The "paste your own key" fields under 🤖 المساعد الذكي still exist as a manual fallback (e.g. if AI features are disabled for the team), but shouldn't be needed.
+## AI — no key needed on phones
+`netlify/functions/ai.js` calls a free model on **OpenRouter** using an `AI_API_KEY` environment variable already set in Netlify (Site configuration → Environment variables) — nothing to paste on any phone, and it costs nothing (the model has a `:free` suffix).
+- Don't remove/rename the `AI_API_KEY` variable in Netlify, or the function stops working.
+- Test it: in the app go to المزيد → 🤖 المساعد الذكي → press **🧪 اختبار المساعد**. It should say ✅.
+- The "paste your own key" fields under 🤖 المساعد الذكي still exist as a manual fallback, but shouldn't be needed.
 
 ## What changed in v2
 - ☀️ اليوم tab: my tasks for today as big checkboxes, streak (current / longest / total), 16-week activity heatmap, weekly leaderboard, pending messages, shopping count.

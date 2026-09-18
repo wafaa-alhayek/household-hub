@@ -6,7 +6,7 @@ A private family app for 3 people (the owner, his sister, their mother) to manag
 - **One static page**: `index.html` (vanilla JS, no framework, no build step). CSS/JS inline.
 - **PWA**: `sw.js` + `manifest.json` + icons → opens offline after first visit.
 - **Backend**: Firebase Firestore (offline persistence on) + Anonymous Auth. Config is in a small `<script>` block near the top of `index.html` (`window.FIREBASE_CONFIG`). Data lives under `families/{familyCode}/…`. The family code is a shared secret each phone types once; it is **never** in the repo.
-- **AI**: `netlify/functions/ai.js` proxies to Anthropic via **Netlify AI Gateway** (`process.env.ANTHROPIC_BASE_URL` + `ANTHROPIC_API_KEY`, injected by Netlify). Do **not** add an `ANTHROPIC_API_KEY` env var in Netlify — that disables the gateway. Model is locked to `claude-haiku-4-5-20251001`, max_tokens capped at 600. Frontend falls back to a key shared via Firestore settings, then a per-phone key, if the function is absent.
+- **AI**: `netlify/functions/ai.js` proxies to a free model on **OpenRouter** (`process.env.AI_API_KEY`, an OpenRouter key set manually in Netlify → Site configuration → Environment variables — do not remove it, nothing auto-injects it). Model is a `FREE_MODEL` constant at the top of the file (currently `deepseek/deepseek-v4-flash-0731:free`) — swap it for another `:free`-suffixed model from https://openrouter.ai/models?max_price=0 if needed. The function translates the Anthropic-shaped request/response the frontend uses to/from OpenRouter's OpenAI-compatible format, so `index.html`'s `callAI()` is unchanged. max_tokens capped at 600 (set client-side). Frontend falls back to a key shared via Firestore settings, then a per-phone key (direct Anthropic call), if the function is absent.
 - **Hosting**: Netlify, linked to this GitHub repo. Push to `main` = production deploy.
 
 ## Hard constraints — do not break
@@ -20,7 +20,7 @@ A private family app for 3 people (the owner, his sister, their mother) to manag
 8. **Errors must be visible** — never silently fall back. Use `toast()` / red `.bubble.err` / `errorCard()`.
 
 ## Netlify credits — this matters
-Free plan = 300 credits/month, hard cap; at 0 the site pauses. **Each production deploy = 15 credits.** AI use ≈ 1 credit per message. So: batch changes, test locally first (just open `index.html` in a browser — everything except the gateway works from file://), push once. Avoid pushing trivial tweaks.
+Free plan = 300 credits/month, hard cap; at 0 the site pauses. **Each production deploy = 15 credits.** AI use does **not** cost Netlify credits (it goes through OpenRouter's free tier via `AI_API_KEY`, not Netlify's own AI Gateway). So the only thing to batch is deploys: test locally first (just open `index.html` in a browser — everything except the function itself works from file://), push once. Avoid pushing trivial tweaks.
 
 ## Data model (Firestore + localStorage mirror)
 - `meta/settings`: `{members:[{id,name}], profiles:{memberId:{speak,values,wants,triggers,calm,note}}, aiKey, updatedAt}`
