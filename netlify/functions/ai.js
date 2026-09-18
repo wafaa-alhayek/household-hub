@@ -8,7 +8,7 @@
 // out) so this function translates to/from OpenRouter's OpenAI-compatible
 // format. Change FREE_MODEL to swap models; see https://openrouter.ai/models?max_price=0
 // for the current list of ":free" options.
-const FREE_MODEL = "deepseek/deepseek-v4-flash-0731:free";
+const FREE_MODEL = "google/gemma-4-31b-it:free";
 
 exports.handler = async (event) => {
   const key = process.env.AI_API_KEY;
@@ -23,7 +23,7 @@ exports.handler = async (event) => {
     const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
-      body: JSON.stringify({ model: FREE_MODEL, messages: orMessages, max_tokens: max_tokens || 600 })
+      body: JSON.stringify({ model: FREE_MODEL, messages: orMessages, max_tokens: max_tokens || 600, reasoning: { enabled: false } })
     });
     if (!res.ok) {
       const text = await res.text();
