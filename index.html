@@ -312,7 +312,7 @@ async function initCloud(){
       push:(col,item)=>fsM.setDoc(fsM.doc(db,"families",fam,col,item.id),item).catch(e=>console.warn("push",e)),
       remove:(col,id)=>fsM.deleteDoc(fsM.doc(db,"families",fam,col,id)).catch(e=>console.warn("del",e)),
       pushSettings:()=>fsM.setDoc(settingsRef,{members:state.settings.members,profiles:state.settings.profiles||{},aiKey:state.settings.aiKey||"",updatedAt:Date.now()}).catch(e=>console.warn("settings",e)),
-      pushCase:(c)=>fsM.setDoc(fsM.doc(db,"families",fam,"cases",c.id),{id:c.id,from:c.from,about:c.about,title:c.title,stage:c.stage,neutralSummary:c.neutralSummary||"",suggestions:c.suggestions||[],proposedResolution:c.proposedResolution||"",noteFromSender:c.noteFromSender||"",noteFromResponder:c.noteFromResponder||"",updatedAt:Date.now()}).catch(e=>console.warn("case",e))
+      pushCase:(c)=>fsM.setDoc(fsM.doc(db,"families",fam,"cases",c.id),{id:c.id,from:c.from,about:c.about,title:c.title,stage:c.stage,neutralSummary:c.neutralSummary||"",suggestions:c.suggestions||[],proposedResolution:c.proposedResolution||"",noteFromSender:c.noteFromSender||"",noteFromResponder:c.noteFromResponder||"",tag:c.tag||"",takeaway:c.takeaway||"",sentAt:c.sentAt||0,openedAt:c.openedAt||0,round:c.round||1,rounds:c.rounds||[],updatedAt:Date.now()}).catch(e=>console.warn("case",e))
     };
     let seeded=lsGet("hh_cloud_seeded_"+fam)==="1";
     if(!seeded){ for(const col of SYNCED_COLLECTIONS) for(const it of state[col]) await cloud.push(col,it); await cloud.pushSettings(); lsSet("hh_cloud_seeded_"+fam,"1"); }
@@ -331,9 +331,17 @@ async function initCloud(){
     fsM.onSnapshot(root("cases"), qs=>{
       let changed=false;
       qs.forEach(d=>{ const r=d.data(); let local=findCase(r.id);
-        if(r.about===meId && r.stage==="sent" && !local){ cases.push({id:r.id,from:r.from,about:meId,title:r.title,stage:"received",threadA:[],neutralSummary:r.neutralSummary,suggestions:r.suggestions||[],threadB:[],proposedResolution:"",noteFromSender:r.noteFromSender||"",noteFromResponder:"",createdAt:Date.now()}); changed=true; toast(`📩 وصلتك رسالة من ${memberName(r.from)}`); }
-        if(r.from===meId && r.stage==="b_ready" && local && local.stage!=="awaiting_a" && local.stage!=="closed"){ local.proposedResolution=r.proposedResolution; local.noteFromResponder=r.noteFromResponder||""; local.stage="awaiting_a"; changed=true; toast(`✅ رد ${memberName(r.about)} جاهز`); }
-        if(r.stage==="closed" && local && local.stage!=="closed"){ local.stage="closed"; changed=true; }
+        if(r.about===meId && r.stage==="sent" && !local){ cases.push({id:r.id,from:r.from,about:meId,title:r.title,tag:r.tag||"",stage:"received",threadA:[],neutralSummary:r.neutralSummary,suggestions:r.suggestions||[],threadB:[],proposedResolution:"",noteFromSender:r.noteFromSender||"",noteFromResponder:"",takeaway:"",sentAt:r.sentAt||0,openedAt:0,round:r.round||1,rounds:r.rounds||[],createdAt:Date.now()}); changed=true; toast(`📩 وصلتك رسالة من ${memberName(r.from)}`); }
+        // sender revised before this phone opened it — refresh the inbox copy in place
+        if(r.about===meId && r.stage==="sent" && local && !local.openedAt && (r.round||1)===(local.round||1) && (local.neutralSummary!==r.neutralSummary || (local.noteFromSender||"")!==(r.noteFromSender||""))){
+          local.neutralSummary=r.neutralSummary; local.suggestions=r.suggestions||[]; local.noteFromSender=r.noteFromSender||""; local.stage="received"; changed=true; toast(`✏️ عدّل ${memberName(r.from)} رسالته`); }
+        // a further round arrived on a case this phone already holds
+        if(r.about===meId && r.stage==="sent" && local && (r.round||1)>(local.round||1)){
+          local.neutralSummary=r.neutralSummary; local.suggestions=r.suggestions||[]; local.noteFromSender=r.noteFromSender||""; local.proposedResolution=""; local.noteFromResponder=""; local.takeaway=""; local.round=r.round||1; local.rounds=r.rounds||[]; local.sentAt=r.sentAt||0; local.openedAt=0; local.stage="received"; changed=true; toast(`🔁 جولة جديدة من ${memberName(r.from)}`); }
+        if(r.from===meId && r.stage==="b_ready" && local && local.stage!=="awaiting_a" && local.stage!=="closed"){ local.proposedResolution=r.proposedResolution; local.noteFromResponder=r.noteFromResponder||""; local.takeaway=r.takeaway||local.takeaway||""; local.stage="awaiting_a"; changed=true; toast(`✅ رد ${memberName(r.about)} جاهز`); }
+        // recipient opened it — propagate back so the sender's revise button locks
+        if(r.openedAt && local && !local.openedAt){ local.openedAt=r.openedAt; changed=true; }
+        if(r.stage==="closed" && local && local.stage!=="closed"){ local.stage="closed"; local.rounds=r.rounds||local.rounds||[]; changed=true; }
       });
       if(changed){ saveCases(); render(); }
     });
@@ -386,6 +394,7 @@ function isDueToday(c, dateStr){
   const d=new Date((dateStr||todayStr())+"T12:00:00").getDay();
   if(c.freq==="daily"||c.freq==="weekly") return true;
   if(c.freq==="days") return (c.days||[]).includes(d);
+  if(c.freq==="anytime") return false;
   if(c.freq==="once") return Object.keys(c.log||{}).length===0;
   return true;
 }
@@ -398,7 +407,7 @@ function toggleChoreDone(id, dateStr){
   touch(c); saveState(); if(cloud) cloud.push("chores",c); render();
 }
 function deleteChore(id){ state.chores=state.chores.filter(c=>c.id!==id); saveState(); if(cloud) cloud.remove("chores",id); render(); }
-function addRestock(name,qty,price,note){ const it=touch({id:uid(),name,qty:qty||"",price:price||"",note:note||"",status:"needed",addedBy:meId,addedAt:Date.now(),boughtBy:null,boughtAt:null}); state.restock.push(it); saveState(); if(cloud) cloud.push("restock",it); render(); }
+function addRestock(name,qty,price,note,bought){ const it=touch({id:uid(),name,qty:qty||"",price:price||"",note:note||"",status:bought?"bought":"needed",addedBy:meId,addedAt:Date.now(),boughtBy:bought?meId:null,boughtAt:bought?Date.now():null}); state.restock.push(it); saveState(); if(cloud) cloud.push("restock",it); render(); }
 function toggleRestock(id){ const r=state.restock.find(x=>x.id===id); if(!r) return; r.status=r.status==="needed"?"bought":"needed"; r.boughtBy=r.status==="bought"?meId:null; r.boughtAt=r.status==="bought"?Date.now():null; touch(r); saveState(); if(cloud) cloud.push("restock",r); render(); }
 function deleteRestock(id){ state.restock=state.restock.filter(r=>r.id!==id); saveState(); if(cloud) cloud.remove("restock",id); render(); }
 function addPublicComplaint(from,about,title,resolution){ const it=touch({id:uid(),from,about,title,description:resolution,status:"resolved",createdAt:Date.now()}); state.complaints.push(it); saveState(); if(cloud) cloud.push("complaints",it); render(); }
@@ -408,9 +417,25 @@ function toggleKudosConfirm(id){ const k=state.kudos.find(x=>x.id===id); if(!k||
 function deleteKudos(id){ state.kudos=state.kudos.filter(k=>k.id!==id); saveState(); if(cloud) cloud.remove("kudos",id); render(); }
 function addAgreedRule(text,sourceCaseId,sourceTitle){ const it=touch({id:uid(),text,sourceCaseId:sourceCaseId||"",sourceTitle:sourceTitle||"",createdAt:Date.now()}); state.agreedRules.push(it); saveState(); if(cloud) cloud.push("agreedRules",it); render(); }
 function deleteAgreedRule(id){ state.agreedRules=state.agreedRules.filter(r=>r.id!==id); saveState(); if(cloud) cloud.remove("agreedRules",id); render(); }
-function newCase(about,title){ const c={id:uid(),from:meId,about,title,stage:"draft_a",threadA:[],neutralSummary:"",suggestions:[],threadB:[],proposedResolution:"",noteFromSender:"",noteFromResponder:"",createdAt:Date.now()}; cases.push(c); saveCases(); return c; }
+function newCase(about,title){ const c={id:uid(),from:meId,about,title,tag:"",stage:"draft_a",threadA:[],neutralSummary:"",suggestions:[],threadB:[],proposedResolution:"",noteFromSender:"",noteFromResponder:"",takeaway:"",sentAt:0,openedAt:0,round:1,rounds:[],createdAt:Date.now()}; cases.push(c); saveCases(); return c; }
+function deleteCase(id){ cases=cases.filter(c=>c.id!==id); saveCases(); if(cloud) cloud.remove("cases",id); render(); }
+const MAX_ROUNDS=3;
+function roundNum(n){ return ["","١","٢","٣"][n]||n; }
+// snapshot of the round that just ended, so both phones keep the same history
+function archiveRound(c){ c.rounds=c.rounds||[]; c.rounds.push({n:c.round||1,neutralSummary:c.neutralSummary||"",suggestions:c.suggestions||[],noteFromSender:c.noteFromSender||"",proposedResolution:c.proposedResolution||"",noteFromResponder:c.noteFromResponder||"",takeaway:c.takeaway||""}); }
+function roundsMapHTML(c){
+  if(!c.rounds||!c.rounds.length) return "";
+  return `<div class="card" style="margin:0 0 14px;padding:10px 12px;background:var(--chip);border:none;"><strong style="font-size:0.95rem;">🗺️ وين وصلنا</strong>
+    ${c.rounds.map(r=>`<div class="meta" style="margin-top:6px;">الجولة ${roundNum(r.n)}: ${esc(r.takeaway||"بدون خلاصة")}</div>`).join("")}
+    ${c.stage!=="closed"?`<div class="meta" style="margin-top:6px;color:var(--accent);">الجولة ${roundNum(c.round||1)}: الحالية</div>`:""}</div>`;
+}
+// hard constraint 1: threadA/threadB never sync — this only re-reads what is already on this phone
+function privateThreadHTML(thread,label){
+  if(!thread||!thread.length) return "";
+  return `<details style="margin-top:12px;"><summary style="cursor:pointer;color:var(--ink-dim);">📄 ${esc(label)}</summary><div class="chatbox" style="margin-top:8px;">${threadHTML(thread)}</div></details>`;
+}
 function findCase(id){ return cases.find(c=>c.id===id); }
-function buildPackage(c,side){ return btoa(unescape(encodeURIComponent(JSON.stringify({id:c.id,title:c.title,from:c.from,about:c.about,neutralSummary:c.neutralSummary,suggestions:c.suggestions,proposedResolution:c.proposedResolution,noteFromSender:c.noteFromSender,noteFromResponder:c.noteFromResponder,side})))); }
+function buildPackage(c,side){ return btoa(unescape(encodeURIComponent(JSON.stringify({id:c.id,title:c.title,from:c.from,about:c.about,tag:c.tag||"",neutralSummary:c.neutralSummary,suggestions:c.suggestions,proposedResolution:c.proposedResolution,noteFromSender:c.noteFromSender,noteFromResponder:c.noteFromResponder,takeaway:c.takeaway||"",round:c.round||1,rounds:c.rounds||[],side})))); }
 function readPackage(code){ try{ return JSON.parse(decodeURIComponent(escape(atob(code.trim())))); }catch(e){ return null; } }
 function exportCode(){ return btoa(unescape(encodeURIComponent(JSON.stringify(state)))); }
 function importCode(code){ try{ const inc=JSON.parse(decodeURIComponent(escape(atob(code.trim())))); if(inc.settings) state.settings=Object.assign(state.settings,inc.settings); ["chores","restock","complaints","kudos","agreedRules"].forEach(k=>{ if(inc[k]) state[k]=mergeArrayById(state[k],inc[k]); }); saveState(); return true; }catch(e){ return false; } }
@@ -460,7 +485,7 @@ function qrSVG(text){
 }
 
 // ================= RENDER =================
-let currentView="today", settingsView=null, calMonth=null, calSelected=null;
+let currentView="today", settingsView=null, calMonth=null, calSelected=null, selectedTag=null;
 function render(){
   const app=document.getElementById("app");
   if(!meId){ app.innerHTML=renderPicker(); document.getElementById("tabbar").style.display="none"; bindPicker(); return; }
@@ -488,6 +513,7 @@ function bindPicker(){ document.querySelectorAll(".memberpick button").forEach(b
 
 function renderToday(){
   const t=todayStr(); const mine=state.chores.filter(c=>isMine(c)&&isDueToday(c));
+  const anytime=state.chores.filter(c=>c.freq==="anytime");
   const pending=mine.filter(c=>!c.log[t]), done=mine.filter(c=>c.log[t]);
   const st=streakFor(meId);
   const week=state.settings.members.map(m=>({m, n:Object.entries(dayCounts(m.id)).filter(([d])=>d>=addDays(t,-6)).reduce((a,[,n])=>a+n,0)}));
@@ -517,6 +543,11 @@ function renderToday(){
       <div style="margin-top:12px;">${heatmapSVG(meId,16)}</div>
       <p class="meta" style="text-align:center;">آخر ١٦ أسبوع — كل مربع يوم، وأغمق يعني أنجزت أكثر</p>
     </div>
+    ${anytime.length?`<div class="card"><strong>🗂️ مهام حسب الحاجة</strong>
+      <p class="sub" style="margin-top:4px;">مو مجدولة — سوّها لما تحتاج، وتنحسب لك مثل باقي المهام.</p>
+      ${anytime.map(c=>{ const dt=c.log[t];
+        return `<div class="item"><div class="title-line"><div><strong>${esc(c.title)}</strong><div class="meta">${c.assignee==="anyone"?"أي أحد":esc(memberName(c.assignee))}</div></div>${dt?`<span class="done-badge">✓ ${esc(memberName(dt.by))} اليوم</span>`:`<button class="btn small" data-toggle-chore="${c.id}">سويتها</button>`}</div></div>`; }).join("")}
+    </div>`:""}
     <div class="card"><strong>🏆 هذا الأسبوع</strong>
       ${week.sort((a,b)=>b.n-a.n).map((w,i)=>`<div class="lb"><span style="width:28px;">${["🥇","🥈","🥉"][i]||""}</span><span style="width:70px;">${esc(w.m.name)}</span><div class="bar"><i style="width:${Math.round(w.n/max*100)}%;background:${memberColor(w.m.id)}"></i></div><b>${w.n}</b></div>`).join("")}
     </div>
@@ -531,13 +562,13 @@ function renderChores(){
     <div class="card"><label class="f">إضافة مهمة</label><input type="text" id="newChoreTitle" placeholder="مثلاً: الصحون، القمامة">
       <label class="f">لمين؟</label><select id="newChoreAssignee">${state.settings.members.map(m=>`<option value="${m.id}" ${m.id===meId?"selected":""}>${esc(m.name)}</option>`).join("")}<option value="anyone">أي أحد</option></select>
       <label class="f">متى؟</label>
-      <div class="row" id="freqRow"><button class="daybtn sel" data-freq="daily">كل يوم</button><button class="daybtn" data-freq="days">أيام معينة</button><button class="daybtn" data-freq="once">مرة وحدة</button></div>
+      <div class="row" id="freqRow"><button class="daybtn sel" data-freq="daily">كل يوم</button><button class="daybtn" data-freq="days">أيام معينة</button><button class="daybtn" data-freq="once">مرة وحدة</button><button class="daybtn" data-freq="anytime">عند الحاجة</button></div>
       <div class="row" id="daysRow" style="display:none;margin-top:8px;">${DOW_ORDER.map(d=>`<button class="daybtn" data-day="${d}">${DOW_S[d]}</button>`).join("")}</div>
       <button class="btn" id="addChoreBtn" style="margin-top:12px;">إضافة</button></div>
     <div class="card">${renderCalendar()}</div>
     <div class="card"><strong>كل المهام</strong>
       ${items.length===0?`<p class="sub">ما فيه مهام بعد.</p>`:items.map(c=>{ const dt=c.log[t];
-        return `<div class="item"><div class="title-line"><div><strong>${esc(c.title)}</strong><div class="meta"><span style="color:${c.assignee==="anyone"?"inherit":memberColor(c.assignee)}">${c.assignee==="anyone"?"أي أحد":esc(memberName(c.assignee))}</span> · ${c.freq==="daily"||c.freq==="weekly"?"كل يوم":c.freq==="days"?(c.days||[]).map(d=>DOW_S[d]).join(" "):"مرة وحدة"}</div></div><button class="iconbtn" data-del-chore="${c.id}">✕</button></div>
+        return `<div class="item"><div class="title-line"><div><strong>${esc(c.title)}</strong><div class="meta"><span style="color:${c.assignee==="anyone"?"inherit":memberColor(c.assignee)}">${c.assignee==="anyone"?"أي أحد":esc(memberName(c.assignee))}</span> · ${c.freq==="daily"||c.freq==="weekly"?"كل يوم":c.freq==="days"?(c.days||[]).map(d=>DOW_S[d]).join(" "):c.freq==="anytime"?"عند الحاجة":"مرة وحدة"}</div></div><button class="iconbtn" data-del-chore="${c.id}">✕</button></div>
           <div style="margin-top:10px;">${dt?`<span class="done-badge">✓ ${esc(memberName(dt.by))} اليوم</span>`:isDueToday(c)?`<button class="btn small" data-toggle-chore="${c.id}">سويتها اليوم ✅</button>`:`<span class="meta">مو مطلوبة اليوم</span>`}</div></div>`; }).join("")}
     </div>`;
 }
@@ -569,22 +600,29 @@ function renderRestock(){
     <div class="card"><label class="f">شي خلص أو قرب يخلص؟</label><input type="text" id="rName" placeholder="مثلاً: حليب، صابون">
       <div class="row" style="margin-top:8px;"><input type="text" id="rQty" placeholder="الكمية (اختياري)" style="flex:1;"><input type="number" id="rPrice" placeholder="السعر (اختياري)" style="flex:1;" inputmode="decimal"></div>
       <input type="text" id="rNote" placeholder="ملاحظة (اختياري)" style="margin-top:8px;">
-      <button class="btn" id="addRestockBtn" style="margin-top:12px;">إضافة للقائمة</button></div>
+      <button class="btn" id="addRestockBtn" style="margin-top:12px;">إضافة للقائمة</button>
+      <p class="footer-note" style="margin-top:8px;">تقدر تكتب كم شي مرة وحدة، افصل بينهم بفاصلة أو بـ"و": حليب، خبز و صابون</p>
+      ${proxyAvailable!==false?`<button class="btn secondary" id="scanReceiptBtn" style="margin-top:10px;">📷 امسح الفاتورة</button><input type="file" id="receiptFile" accept="image/*" capture="environment" style="display:none;"><p class="footer-note" style="margin-top:6px;">صوّر الفاتورة وتنضاف الأغراض تلقائياً كمشتريات — راجعها قبل التأكيد.</p>`:""}</div>
     <div class="card"><div class="row" style="justify-content:space-between;"><strong>ناقص (${needed.length})</strong>${total?`<span class="chip">المجموع التقريبي: ${total.toFixed(2)}</span>`:""}</div>
       ${needed.length===0?`<p class="sub">القائمة فاضية 👍</p>`:needed.map(r=>`<div class="item"><div class="title-line"><div><strong>${esc(r.name)}</strong>${line(r)?`<div class="meta">${line(r)}</div>`:""}<div class="meta">أضافه ${esc(memberName(r.addedBy))}</div></div><button class="iconbtn" data-del-restock="${r.id}">✕</button></div><button class="btn small" style="margin-top:8px;" data-toggle-restock="${r.id}">اشتريته ✅</button></div>`).join("")}</div>
     ${bought.length?`<div class="card"><strong>اشتريناه أخيراً</strong>${bought.map(r=>`<div class="item"><div class="title-line"><div><strong>${esc(r.name)}</strong><div class="meta">اشتراه ${esc(memberName(r.boughtBy))}</div></div><button class="btn small secondary" data-toggle-restock="${r.id}">تراجع</button></div></div>`).join("")}</div>`:""}`;
 }
 
-function stageLabel(s){ return {draft_a:"تسوي الملخص",ready_to_send:"جاهزة للإرسال",sent:"بانتظار الرد",received:"وصلتك، جاوب عليها",b_ready:"ردك جاهز",awaiting_a:"بانتظار موافقتك",agreed:"تم الاتفاق ✅",closed:"مغلقة"}[s]||s; }
+function stageLabel(s){ return {draft_a:"مسودة — لسا ما أرسلتها",ready_to_send:"جاهزة للإرسال",sent:"بانتظار الرد",received:"وصلتك، جاوب عليها",b_ready:"ردك جاهز",awaiting_a:"بانتظار موافقتك",agreed:"تم الاتفاق ✅",closed:"مغلقة"}[s]||s; }
 function renderComplaints(){
   const items=state.complaints.slice().sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
   const my=cases.filter(c=>c.from===meId&&c.stage!=="closed"), forMe=cases.filter(c=>c.about===meId&&(c.stage==="received"||c.stage==="b_ready"));
+  const tags=[...new Set(my.map(c=>c.tag).filter(Boolean))];
+  const myShown=selectedTag?my.filter(c=>c.tag===selectedTag):my;
   return `${hdr("💬 الشكاوى")}
     ${forMe.length?`<div class="card" style="border-color:var(--accent);"><strong>📩 رسائل وصلتك (${forMe.length})</strong>${forMe.map(c=>`<div class="item"><div class="title-line"><div><strong>${esc(c.title||"(بدون عنوان)")}</strong><div class="meta">من ${esc(memberName(c.from))} · ${stageLabel(c.stage)}</div></div><button class="btn small" data-open-received="${c.id}">فتح</button></div></div>`).join("")}</div>`:""}
     <div class="card"><div class="bigicon">🕊️</div><p style="text-align:center;font-weight:700;font-size:1.1rem;">عندك شي يضايقك؟</p>
       <p class="sub" style="text-align:center;">تتكلم عنه بخصوصية أول، وبعدين يوصل ملخص هادئ للطرف الثاني — وما ينشر شي إلا لما تتفقون.</p>
       <button class="btn" id="startCaseBtn">ابدأ شكوى خاصة</button></div>
-    ${my.length?`<div class="card"><strong>قضاياي</strong>${my.map(c=>`<div class="item"><div class="title-line"><div><strong>${esc(c.title||"(بدون عنوان)")}</strong><div class="meta">مع ${esc(memberName(c.about))} · ${stageLabel(c.stage)}</div></div><button class="btn small ${c.stage==="awaiting_a"?"":"secondary"}" data-open-case="${c.id}">فتح</button></div></div>`).join("")}</div>`:""}
+    ${my.length?`<div class="card"><strong>قضاياي</strong>
+      ${tags.length?`<div class="row" style="margin-top:8px;flex-wrap:wrap;gap:6px;"><button class="daybtn ${selectedTag?"":"sel"}" data-tag="">الكل</button>${tags.map(tg=>`<button class="daybtn ${selectedTag===tg?"sel":""}" data-tag="${esc(tg)}">${esc(tg)}</button>`).join("")}</div>`:""}
+      ${myShown.length===0?`<p class="sub" style="margin-top:10px;">ما فيه قضايا بهذا التصنيف.</p>`:""}
+      ${myShown.map(c=>`<div class="item"><div class="title-line"><div><strong>${esc(c.title||"(بدون عنوان)")}</strong><div class="meta">مع ${esc(memberName(c.about))} · ${stageLabel(c.stage)}${c.tag?` · 🏷️ ${esc(c.tag)}`:""}${(c.round||1)>1?` · الجولة ${roundNum(c.round)}`:""}</div></div><div class="row" style="gap:6px;"><button class="btn small ${c.stage==="awaiting_a"?"":"secondary"}" data-open-case="${c.id}">فتح</button><button class="iconbtn" data-del-case="${c.id}">✕</button></div></div></div>`).join("")}</div>`:""}
     ${cloud?"":`<div class="card"><button class="btn secondary" id="receiveCaseBtn">📩 استلمت رمز من حد</button><p class="footer-note" style="margin-top:8px;">بدون سحابة، الرسائل تنتقل بالرموز.</p></div>`}
     ${state.agreedRules.length?`<div class="card"><strong>📜 قواعد متفق عليها</strong>
       ${state.agreedRules.slice().sort((a,b)=>(b.createdAt||0)-(a.createdAt||0)).map(r=>`<div class="item"><div class="title-line"><div><p style="margin:0;">${esc(r.text)}</p><div class="meta">${new Date(r.createdAt).toLocaleDateString("ar")}${r.sourceTitle?" · من: "+esc(r.sourceTitle):""}</div></div><button class="iconbtn" data-del-rule="${r.id}">✕</button></div></div>`).join("")}
@@ -681,8 +719,9 @@ function openCaseModal(caseId){
   function draw(){
     const inner=document.getElementById("caseModalInner");
     if(c.stage==="draft_a"){
-      inner.innerHTML=`<div class="stagepill">خطوة ١ — تعريف الشكوى</div><label class="f">عن مين؟</label><select id="caseAbout">${state.settings.members.filter(m=>m.id!==meId).map(m=>`<option value="${m.id}" ${c.about===m.id?"selected":""}>${esc(m.name)}</option>`).join("")}</select>
+      inner.innerHTML=`${roundsMapHTML(c)}<div class="stagepill">خطوة ١ — تعريف الشكوى${(c.round||1)>1?` — الجولة ${roundNum(c.round)}`:""}</div><label class="f">عن مين؟</label><select id="caseAbout">${state.settings.members.filter(m=>m.id!==meId).map(m=>`<option value="${m.id}" ${c.about===m.id?"selected":""}>${esc(m.name)}</option>`).join("")}</select>
         <label class="f">عنوان قصير</label><input type="text" id="caseTitle" value="${esc(c.title||"")}" placeholder="مثلاً: المهام البيتية">
+        <label class="f">تصنيف (اختياري)</label><input type="text" id="caseTag" value="${esc(c.tag||"")}" placeholder="مثلاً: المطبخ، الوقت، الفلوس">
         ${activeFrameworkSummary()?`<p class="footer-note" style="text-align:right;background:var(--chip);padding:8px 10px;border-radius:10px;">${activeFrameworkSummary()}</p>`:""}
         <div class="chatbox" id="caseChat">${threadHTML(c.threadA)}</div><textarea id="caseInput" placeholder="اكتب اللي بخاطرك — هذا خاص بك فقط."></textarea>
         <button class="btn small secondary" id="caseSend" style="margin-top:8px;">أرسل</button><button class="btn" id="caseFinish" style="margin-top:12px;">خلصت، جهز الملخص ➜</button>`;
@@ -692,34 +731,53 @@ function openCaseModal(caseId){
         const res=await callAI(buildJudgmentContext()+`أنت مساعد هادئ ومحايد داخل تطبيق عائلي. الشخص يتكلم معك بخصوصية قبل ما توصل شكواه لأحد. رد على ما قاله بالتحديد، ثم اسأله سؤال واحد قصير لتوضيح: ماذا حدث بالضبط، كيف أثر فيه، أو ماذا يتمنى. أقل من ٧٠ كلمة، بعربية بسيطة ودافئة.`, c.threadA.filter(t=>t.role!=="error"));
         if(res.ok) c.threadA.push({role:"assistant",content:flagUnverifiedCitations(res.text)}); else { c.threadA.push({role:"error",content:"⚠️ المساعد ما رد: "+res.reason}); c.threadA.push({role:"assistant",content:scriptedPrompt(c.threadA.filter(t=>t.role==="user").length-1)}); }
         saveCases(); chat.innerHTML=threadHTML(c.threadA); chat.scrollTop=chat.scrollHeight; };
-      document.getElementById("caseFinish").onclick=async()=>{ c.about=document.getElementById("caseAbout").value; c.title=document.getElementById("caseTitle").value.trim()||"بدون عنوان";
+      document.getElementById("caseFinish").onclick=async()=>{ c.about=document.getElementById("caseAbout").value; c.title=document.getElementById("caseTitle").value.trim()||"بدون عنوان"; c.tag=document.getElementById("caseTag").value.trim();
         const ut=c.threadA.filter(t=>t.role==="user").map(t=>t.content).join("\n"); toast("لحظة، نجهز الملخص…");
-        const res=await callAI(buildJudgmentContext()+`لخّص الموقف التالي بجملتين إلى ثلاث بصيغة محايدة تماماً (بدون اتهام). طبّق المبادئ أعلاه، وإذا استشهدت بآية أو حديث اذكر مرجعه بين قوسين داخل النص. ثم اقترح ٢-٣ حلول عملية. رد بصيغة JSON فقط: {"summary":"...","suggestions":["...","..."]}`, [{role:"user",content:ut||c.title}]);
-        if(res.ok){ try{ const j=JSON.parse(res.text.match(/\{[\s\S]*\}/)[0]); c.neutralSummary=flagUnverifiedCitations(j.summary); c.suggestions=(j.suggestions||[]).map(flagUnverifiedCitations); }catch(e){ c.neutralSummary=res.text.slice(0,400); c.suggestions=[]; } }
-        else { toast("⚠️ "+res.reason); c.neutralSummary=ut.slice(0,300)||c.title; c.suggestions=["نجلس الثلاثة ونتكلم بهدوء، دقيقتين لكل شخص بدون مقاطعة."]; }
+        const res=await callAI(buildJudgmentContext()+`لخّص الموقف التالي بجملتين إلى ثلاث بصيغة محايدة تماماً (بدون اتهام). طبّق المبادئ أعلاه، وإذا استشهدت بآية أو حديث اذكر مرجعه بين قوسين داخل النص. ثم اقترح ٢-٣ حلول عملية. ثم اكتب خلاصة قصيرة جداً (٦ كلمات أو أقل) تصف موضوع هذه الجولة. رد بصيغة JSON فقط: {"summary":"...","suggestions":["...","..."],"takeaway":"..."}`, [{role:"user",content:ut||c.title}]);
+        if(res.ok){ try{ const j=JSON.parse(res.text.match(/\{[\s\S]*\}/)[0]); c.neutralSummary=flagUnverifiedCitations(j.summary); c.suggestions=(j.suggestions||[]).map(flagUnverifiedCitations); c.takeaway=String(j.takeaway||"").trim().slice(0,60); }catch(e){ c.neutralSummary=res.text.slice(0,400); c.suggestions=[]; c.takeaway=res.text.trim().slice(0,40); } }
+        else { toast("⚠️ "+res.reason); c.neutralSummary=ut.slice(0,300)||c.title; c.suggestions=["نجلس الثلاثة ونتكلم بهدوء، دقيقتين لكل شخص بدون مقاطعة."]; c.takeaway=(c.title||ut).slice(0,40); }
+        if(!c.takeaway) c.takeaway=(c.title||"بدون خلاصة").slice(0,40);
         c.stage="ready_to_send"; saveCases(); draw(); };
     } else if(c.stage==="ready_to_send"){
-      inner.innerHTML=`<div class="stagepill">خطوة ٢ — راجع قبل الإرسال</div><h2>قال المساعد:</h2><div class="bubble ai">${esc(c.neutralSummary)}</div><label class="f">اقتراحات للحل</label><ul>${c.suggestions.map(s=>`<li>${esc(s)}</li>`).join("")}</ul>
+      inner.innerHTML=`${roundsMapHTML(c)}<div class="stagepill">خطوة ٢ — راجع قبل الإرسال</div><h2>قال المساعد:</h2><div class="bubble ai">${esc(c.neutralSummary)}</div><label class="f">اقتراحات للحل</label><ul>${c.suggestions.map(s=>`<li>${esc(s)}</li>`).join("")}</ul>
         <p class="sub">كلام المساعد ما يتغيّر — إذا فيه شي ناقص أو غير دقيق، أضفه كملاحظة منك وتوصل الاثنين مع بعض.</p>
         <label class="f">ملاحظة منك (اختياري)</label><textarea id="senderNote" placeholder="مثلاً: توضيح، أو تصحيح لشي">${esc(c.noteFromSender||"")}</textarea>
         <p class="sub">هذا اللي بيوصل لـ <strong>${esc(memberName(c.about))}</strong> فقط — مو الكلام الخاص.</p><button class="btn" id="sendBtn">${cloud?"إرسال ➜":"جهز الرمز ➜"}</button><button class="btn secondary" id="backEdit" style="margin-top:8px;">رجوع للمحادثة</button>`;
-      document.getElementById("sendBtn").onclick=()=>{ c.noteFromSender=document.getElementById("senderNote").value.trim(); c.stage="sent"; saveCases(); if(cloud){ cloud.pushCase(c); modal.remove(); render(); toast(`✅ أُرسلت لـ ${memberName(c.about)}`); } else draw(); };
+      document.getElementById("sendBtn").onclick=()=>{ c.noteFromSender=document.getElementById("senderNote").value.trim(); c.stage="sent"; c.sentAt=Date.now(); saveCases(); if(cloud){ cloud.pushCase(c); modal.remove(); render(); toast(`✅ أُرسلت لـ ${memberName(c.about)}`); } else draw(); };
       document.getElementById("backEdit").onclick=()=>{ c.stage="draft_a"; saveCases(); draw(); };
     } else if(c.stage==="sent"){
-      if(cloud){ inner.innerHTML=`<h2>✅ أُرسلت لـ ${esc(memberName(c.about))}</h2><p class="sub">بيوصله تنبيه لما يفتح التطبيق، وبتشوف رده هنا.</p><button class="btn secondary" id="cl">إغلاق</button>`; document.getElementById("cl").onclick=()=>modal.remove(); return; }
-      const pkg=buildPackage(c,"toB");
-      inner.innerHTML=`<h2>أرسل هذا الرمز لـ ${esc(memberName(c.about))}</h2><textarea readonly style="font-family:monospace;font-size:0.85rem;height:90px;">${pkg}</textarea><button class="btn secondary small" id="cp" style="margin-top:8px;">نسخ</button><button class="btn secondary" id="cl" style="margin-top:14px;">إغلاق</button>`;
-      document.getElementById("cp").onclick=()=>navigator.clipboard?.writeText(pkg).then(()=>toast("انتسخ")).catch(()=>toast("حدد وانسخ يدوياً")); document.getElementById("cl").onclick=()=>modal.remove();
+      if(cloud){
+        inner.innerHTML=`${roundsMapHTML(c)}<h2>✅ أُرسلت لـ ${esc(memberName(c.about))}</h2>
+          <p class="sub">${c.openedAt?`فتحها ${esc(memberName(c.about))} — ما عاد تقدر تعدّلها.`:"لسا ما فتحها — تقدر تعدّلها قبل لا يفتحها."}</p>
+          ${c.openedAt?"":`<button class="btn secondary" id="reviseBtn">✏️ عدّل قبل ما توصل</button>`}
+          ${privateThreadHTML(c.threadA,"اعرض محادثتي الخاصة")}
+          <button class="btn secondary" id="cl" style="margin-top:12px;">إغلاق</button>`;
+        const rv=document.getElementById("reviseBtn"); if(rv) rv.onclick=()=>{ c.stage="draft_a"; saveCases(); render(); draw(); toast("عدّل اللي تبي، وبعدين أرسلها من جديد."); };
+        document.getElementById("cl").onclick=()=>modal.remove();
+      } else {
+        const pkg=buildPackage(c,"toB");
+        inner.innerHTML=`${roundsMapHTML(c)}<h2>أرسل هذا الرمز لـ ${esc(memberName(c.about))}</h2><textarea readonly style="font-family:monospace;font-size:0.85rem;height:90px;">${pkg}</textarea><button class="btn secondary small" id="cp" style="margin-top:8px;">نسخ</button>${privateThreadHTML(c.threadA,"اعرض محادثتي الخاصة")}<button class="btn secondary" id="cl" style="margin-top:14px;">إغلاق</button>`;
+        document.getElementById("cp").onclick=()=>navigator.clipboard?.writeText(pkg).then(()=>toast("انتسخ")).catch(()=>toast("حدد وانسخ يدوياً")); document.getElementById("cl").onclick=()=>modal.remove();
+      }
     } else if(c.stage==="awaiting_a"){
-      inner.innerHTML=`<div class="stagepill">وصل الرد</div><h2>قال المساعد:</h2><div class="bubble ai">${esc(c.proposedResolution)}</div>
+      const lastRound=(c.round||1)>=MAX_ROUNDS;
+      inner.innerHTML=`${roundsMapHTML(c)}<div class="stagepill">وصل الرد</div><h2>قال المساعد:</h2><div class="bubble ai">${esc(c.proposedResolution)}</div>
         ${c.noteFromResponder?`<label class="f">ملاحظة من ${esc(memberName(c.about))}</label><p style="background:var(--chip);padding:10px 12px;border-radius:10px;">${esc(c.noteFromResponder)}</p>`:""}
         <p class="sub">إذا يناسبك، اضغط موافق — وتصير القضية جزء من السجل اللي يشوفه الجميع (بدون كلامك الخاص).</p>
-        <button class="btn" id="agreeBtn">أوافق ✅</button><button class="btn secondary" id="notYet" style="margin-top:8px;">مو مقتنع بعد</button>`;
-      document.getElementById("agreeBtn").onclick=()=>{ addPublicComplaint(c.from,c.about,c.title,c.proposedResolution); c.stage="closed"; saveCases(); if(cloud) cloud.pushCase(c); modal.remove(); render();
+        <button class="btn" id="agreeBtn">أوافق ✅</button><button class="btn secondary" id="notYet" style="margin-top:8px;">${lastRound?"مو مقتنع بعد":"مو مقتنع — نبدأ جولة ثانية 🔁"}</button>
+        ${privateThreadHTML(c.threadA,"اعرض محادثتي الخاصة")}`;
+      document.getElementById("agreeBtn").onclick=()=>{ archiveRound(c); addPublicComplaint(c.from,c.about,c.title,c.proposedResolution); c.stage="closed"; saveCases(); if(cloud) cloud.pushCase(c); modal.remove(); render();
         toast("تم! صارت جزء من السجل.");
         setTimeout(()=>{ if(confirm("تبي تضيفها كقاعدة دائمة للبيت؟ (📜 قواعد متفق عليها)")) addAgreedRule(c.proposedResolution,c.id,c.title); }, 400); };
-      document.getElementById("notYet").onclick=()=>{ toast("تقدر تبدأ جولة ثانية إذا تحب."); modal.remove(); };
-    } else { inner.innerHTML=`<p>هذي القضية ${stageLabel(c.stage)}.</p><button class="btn secondary" id="cl">إغلاق</button>`; document.getElementById("cl").onclick=()=>modal.remove(); }
+      document.getElementById("notYet").onclick=()=>{
+        if(lastRound){ inner.innerHTML=`<h2>🤝 وصلتوا لأقصى عدد من الجولات (${roundNum(MAX_ROUNDS)})</h2><p class="sub">نقترح تتكلمون مباشرة وجهاً لوجه — أحياناً هذا أقصر طريق من الكتابة.</p><button class="btn secondary" id="cl">إغلاق</button>`; document.getElementById("cl").onclick=()=>modal.remove(); return; }
+        archiveRound(c);
+        c.neutralSummary=""; c.suggestions=[]; c.noteFromSender=""; c.proposedResolution=""; c.noteFromResponder=""; c.takeaway=""; c.sentAt=0; c.openedAt=0;
+        c.round=(c.round||1)+1; c.stage="draft_a"; saveCases(); if(cloud) cloud.pushCase(c); render(); draw();
+        toast(`بدأت الجولة ${roundNum(c.round)} — كمّل كلامك الخاص.`); };
+    } else { inner.innerHTML=`${roundsMapHTML(c)}<p>هذي القضية ${stageLabel(c.stage)}.</p>${c.proposedResolution?`<h2 style="font-size:1rem;">الاتفاق:</h2><div class="bubble ai">${esc(c.proposedResolution)}</div>`:""}${privateThreadHTML(c.threadA,"اعرض محادثتي الخاصة")}<button class="btn secondary" id="cl" style="margin-top:12px;">إغلاق</button>`; document.getElementById("cl").onclick=()=>modal.remove(); }
+    inner.insertAdjacentHTML("beforeend",`<button class="btn secondary small" id="caseDelBtn" style="margin-top:16px;opacity:.7;">🗑️ احذف القضية</button>`);
+    document.getElementById("caseDelBtn").onclick=()=>{ if(confirm("حذف القضية نهائياً؟ الكلام الخاص فيها ينحذف من هذا الجوال.")){ modal.remove(); deleteCase(c.id); } };
   }
 }
 function openReceivedCaseB(caseId){
@@ -729,7 +787,9 @@ function openReceivedCaseB(caseId){
   if(c.stage==="b_ready") drawSend(); else draw();
   function draw(){
     const inner=document.getElementById("bInner");
-    inner.innerHTML=`<div class="stagepill">رسالة خاصة من ${esc(memberName(c.from))}</div><h2>${esc(c.title)}</h2><h2 style="font-size:1rem;color:var(--ink-dim);margin-top:10px;">قال المساعد:</h2><div class="bubble ai">${esc(c.neutralSummary)}</div>
+    // first look at a received case is what locks the sender out of revising it
+    if(c.stage==="received" && !c.openedAt){ c.openedAt=Date.now(); saveCases(); if(cloud) cloud.pushCase(c); }
+    inner.innerHTML=`${roundsMapHTML(c)}<div class="stagepill">رسالة خاصة من ${esc(memberName(c.from))}${(c.round||1)>1?` — الجولة ${roundNum(c.round)}`:""}</div><h2>${esc(c.title)}</h2><h2 style="font-size:1rem;color:var(--ink-dim);margin-top:10px;">قال المساعد:</h2><div class="bubble ai">${esc(c.neutralSummary)}</div>
       ${c.noteFromSender?`<label class="f">ملاحظة من ${esc(memberName(c.from))}</label><p style="background:var(--chip);padding:10px 12px;border-radius:10px;">${esc(c.noteFromSender)}</p>`:""}
       ${c.suggestions.length?`<label class="f">اقتراحات</label><ul>${c.suggestions.map(s=>`<li>${esc(s)}</li>`).join("")}</ul>`:""}
       <p class="sub">هذا خاص بينك وبين المساعد، لين تجهز ردك.</p>${activeFrameworkSummary()?`<p class="footer-note" style="text-align:right;background:var(--chip);padding:8px 10px;border-radius:10px;">${activeFrameworkSummary()}</p>`:""}
@@ -741,13 +801,16 @@ function openReceivedCaseB(caseId){
       if(res.ok) c.threadB.push({role:"assistant",content:flagUnverifiedCitations(res.text)}); else { c.threadB.push({role:"error",content:"⚠️ المساعد ما رد: "+res.reason}); c.threadB.push({role:"assistant",content:scriptedPrompt(c.threadB.filter(t=>t.role==="user").length-1)}); }
       saveCases(); chat.innerHTML=threadHTML(c.threadB); chat.scrollTop=chat.scrollHeight; };
     document.getElementById("finishB").onclick=async()=>{ const ut=c.threadB.filter(t=>t.role==="user").map(t=>t.content).join("\n"); toast("لحظة…");
-      const res=await callAI(buildJudgmentContext()+`بناءً على الشكوى الأصلية ورد هذا الشخص، اكتب اقتراح حل نهائي عملي ومنصف بجملتين بصيغة "الاتفاق المقترح هو..." بدون لوم. إذا استشهدت بآية أو حديث اذكر مرجعه بين قوسين.`+fenced("الشكوى الأصلية",c.neutralSummary)+fenced("اقتراحات سابقة",c.suggestions.join("، ")), [{role:"user",content:ut||"بدون تفاصيل إضافية"}]);
-      c.proposedResolution=res.ok?flagUnverifiedCitations(res.text.trim()):(ut.slice(0,250)||"نتفق نتكلم الثلاثة بهدوء ونوزع المهام بالتساوي."); if(!res.ok) toast("⚠️ "+res.reason);
+      const res=await callAI(buildJudgmentContext()+`بناءً على الشكوى الأصلية ورد هذا الشخص، اكتب اقتراح حل نهائي عملي ومنصف بجملتين بصيغة "الاتفاق المقترح هو..." بدون لوم. إذا استشهدت بآية أو حديث اذكر مرجعه بين قوسين. ثم اكتب خلاصة قصيرة جداً (٦ كلمات أو أقل) لنتيجة هذه الجولة. رد بصيغة JSON فقط: {"resolution":"...","takeaway":"..."}`+fenced("الشكوى الأصلية",c.neutralSummary)+fenced("اقتراحات سابقة",c.suggestions.join("، ")), [{role:"user",content:ut||"بدون تفاصيل إضافية"}]);
+      if(res.ok){ try{ const j=JSON.parse(res.text.match(/\{[\s\S]*\}/)[0]); c.proposedResolution=flagUnverifiedCitations(String(j.resolution||"").trim()); c.takeaway=String(j.takeaway||"").trim().slice(0,60); }
+        catch(e){ c.proposedResolution=flagUnverifiedCitations(res.text.trim()); c.takeaway=res.text.trim().slice(0,40); } }
+      else { toast("⚠️ "+res.reason); c.proposedResolution=""; c.takeaway=(ut||"بدون رد من المساعد").slice(0,40); }
+      if(!c.proposedResolution) c.proposedResolution=ut.slice(0,250)||"نتفق نتكلم الثلاثة بهدوء ونوزع المهام بالتساوي.";
       c.stage="b_ready"; saveCases(); drawSend(); };
   }
   function drawSend(){
     const inner=document.getElementById("bInner");
-    inner.innerHTML=`<div class="stagepill">ردك</div><h2>قال المساعد:</h2><div class="bubble ai">${esc(c.proposedResolution)}</div>
+    inner.innerHTML=`${roundsMapHTML(c)}<div class="stagepill">ردك</div><h2>قال المساعد:</h2><div class="bubble ai">${esc(c.proposedResolution)}</div>
       <p class="sub">كلام المساعد ما يتغيّر — أضف ملاحظتك لو فيه شي ناقص أو غير دقيق.</p>
       <label class="f">ملاحظة منك (اختياري)</label><textarea id="responderNote" placeholder="مثلاً: توضيح، أو تصحيح لشي">${esc(c.noteFromResponder||"")}</textarea>
       <button class="btn" id="sendRes" style="margin-top:10px;">${cloud?`إرسال الرد لـ ${esc(memberName(c.from))} ➜`:"جهز الرمز ➜"}</button><button class="btn secondary" id="backB" style="margin-top:8px;">رجوع</button>${cloud?"":`<div id="codeBox"></div>`}`;
@@ -761,20 +824,94 @@ function openReceiveCodeModal(){
   const modal=document.createElement("div"); modal.className="modal-bg"; modal.innerHTML=`<div class="card modal"><h2>📩 الصق الرمز</h2><textarea id="recvCode" style="font-family:monospace;font-size:0.85rem;height:90px;"></textarea><button class="btn" id="go" style="margin-top:10px;">فتح</button><button class="btn secondary" id="cl" style="margin-top:8px;">إلغاء</button></div>`; document.body.appendChild(modal);
   document.getElementById("cl").onclick=()=>modal.remove();
   document.getElementById("go").onclick=()=>{ const p=readPackage(document.getElementById("recvCode").value); if(!p) return toast("الرمز ما اشتغل"); modal.remove();
-    if(p.side==="toB"){ cases.push({id:p.id,from:p.from,about:meId,title:p.title,stage:"received",threadA:[],neutralSummary:p.neutralSummary,suggestions:p.suggestions||[],threadB:[],proposedResolution:"",noteFromSender:p.noteFromSender||"",noteFromResponder:"",createdAt:Date.now()}); saveCases(); openReceivedCaseB(p.id); }
-    else { let c=findCase(p.id); if(!c){ c={id:p.id,from:meId,about:p.from,title:p.title,stage:"awaiting_a",threadA:[],neutralSummary:p.neutralSummary,suggestions:p.suggestions||[],threadB:[],proposedResolution:p.proposedResolution,noteFromSender:"",noteFromResponder:p.noteFromResponder||"",createdAt:Date.now()}; cases.push(c); } else { c.proposedResolution=p.proposedResolution; c.noteFromResponder=p.noteFromResponder||""; c.stage="awaiting_a"; } saveCases(); openCaseModal(c.id); } };
+    if(p.side==="toB"){ let c=findCase(p.id);
+      // a later round of a case this phone already holds — refresh it in place instead of
+      // pushing a second copy with the same id (threadB survives, same as the cloud path)
+      if(c){ c.title=p.title; c.tag=p.tag||c.tag||""; c.neutralSummary=p.neutralSummary; c.suggestions=p.suggestions||[]; c.noteFromSender=p.noteFromSender||""; c.proposedResolution=""; c.noteFromResponder=""; c.takeaway=""; c.round=p.round||1; c.rounds=p.rounds||[]; c.openedAt=0; c.stage="received"; }
+      else cases.push({id:p.id,from:p.from,about:meId,title:p.title,tag:p.tag||"",stage:"received",threadA:[],neutralSummary:p.neutralSummary,suggestions:p.suggestions||[],threadB:[],proposedResolution:"",noteFromSender:p.noteFromSender||"",noteFromResponder:"",takeaway:"",sentAt:0,openedAt:0,round:p.round||1,rounds:p.rounds||[],createdAt:Date.now()});
+      saveCases(); openReceivedCaseB(p.id); }
+    else { let c=findCase(p.id); if(!c){ c={id:p.id,from:meId,about:p.from,title:p.title,tag:p.tag||"",stage:"awaiting_a",threadA:[],neutralSummary:p.neutralSummary,suggestions:p.suggestions||[],threadB:[],proposedResolution:p.proposedResolution,noteFromSender:"",noteFromResponder:p.noteFromResponder||"",takeaway:p.takeaway||"",sentAt:0,openedAt:0,round:p.round||1,rounds:p.rounds||[],createdAt:Date.now()}; cases.push(c); } else { c.proposedResolution=p.proposedResolution; c.noteFromResponder=p.noteFromResponder||""; c.takeaway=p.takeaway||c.takeaway||""; c.rounds=p.rounds||c.rounds||[]; c.stage="awaiting_a"; } saveCases(); openCaseModal(c.id); } };
+}
+
+
+// ================= RECEIPT SCANNING (vision, proxy only) =================
+// Shrink the photo before it leaves the phone: a raw camera JPEG is several MB,
+// which the free vision tier will reject outright.
+function compressImage(file,maxW){
+  return new Promise((resolve,reject)=>{
+    const url=URL.createObjectURL(file); const img=new Image();
+    img.onload=()=>{ try{
+      const iw=img.naturalWidth||img.width, ih=img.naturalHeight||img.height;
+      const scale=Math.min(1,maxW/iw), w=Math.max(1,Math.round(iw*scale)), h=Math.max(1,Math.round(ih*scale));
+      const cv=document.createElement("canvas"); cv.width=w; cv.height=h;
+      const ctx=cv.getContext("2d"); ctx.fillStyle="#fff"; ctx.fillRect(0,0,w,h); ctx.drawImage(img,0,0,w,h);
+      URL.revokeObjectURL(url); resolve(cv.toDataURL("image/jpeg",0.7));
+    }catch(e){ URL.revokeObjectURL(url); reject(e); } };
+    img.onerror=()=>{ URL.revokeObjectURL(url); reject(new Error("تعذّر فتح الصورة")); };
+    img.src=url;
+  });
+}
+// Same /.netlify/functions/ai endpoint, but vision:true makes it pick a
+// multimodal model. The personal-Anthropic-key fallback is not wired for
+// images, so this feature needs the proxy.
+async function callAIVision(instruction,imageDataUrl){
+  await detectProxy();
+  if(!proxyAvailable) return {ok:false, reason:"مسح الفاتورة يحتاج خادم الموقع — ما يشتغل بمفتاح شخصي أو بدون إنترنت."};
+  try{
+    const res=await fetch("/.netlify/functions/ai",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({vision:true,max_tokens:900,messages:[{role:"user",content:[{type:"text",text:instruction},{type:"image_url",image_url:{url:imageDataUrl}}]}]})});
+    if(!res.ok){ let detail=""; try{ const j=await res.json(); detail=(j.error&&j.error.message)||JSON.stringify(j); }catch(e){ detail=await res.text().catch(()=>""); }
+      return {ok:false, reason:`(${res.status}) ${detail}`.trim()}; }
+    const data=await res.json();
+    return {ok:true, text:(data.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("\n")};
+  }catch(e){ return {ok:false, reason:"ما قدرنا نوصل للمساعد — تأكد من الإنترنت. "+(e&&e.message?e.message:"")}; }
+}
+function openReceiptModal(file){
+  const modal=document.createElement("div"); modal.className="modal-bg"; modal.innerHTML=`<div class="card modal" id="rcptInner"></div>`; document.body.appendChild(modal);
+  modal.onclick=(e)=>{ if(e.target===modal) modal.remove(); };
+  const inner=document.getElementById("rcptInner");
+  let items=[];
+  const closeBtn=(label)=>`<button class="btn secondary" id="rcptClose" style="margin-top:12px;">${label}</button>`;
+  const bindClose=()=>{ document.getElementById("rcptClose").onclick=()=>modal.remove(); };
+  inner.innerHTML=`<h2>📷 نقرأ الفاتورة…</h2><p class="sub">ثواني، نحلل الصورة.</p>`;
+  (async()=>{
+    let dataUrl;
+    try{ dataUrl=await compressImage(file,1200); }
+    catch(e){ inner.innerHTML=errorCard("قراءة الصورة",e)+closeBtn("إغلاق"); bindClose(); return; }
+    const res=await callAIVision(`اقرأ هذه الفاتورة واستخرج الأغراض المشتراة فقط — بدون المجموع أو الضريبة أو اسم المتجر أو التاريخ. رد بصيغة JSON فقط بدون أي شرح: {"items":[{"name":"اسم الغرض","price":"السعر بالأرقام أو فراغ"}]}`, dataUrl);
+    if(!res.ok){ inner.innerHTML=`<h2>⚠️ ما قدرنا نقرأ الفاتورة</h2><div class="bubble err">${esc(res.reason)}</div><p class="sub">تقدر تضيف الأغراض يدوياً من فوق.</p>`+closeBtn("إغلاق"); bindClose(); return; }
+    try{ const j=JSON.parse(res.text.match(/\{[\s\S]*\}/)[0]);
+      items=(j.items||[]).filter(x=>x&&x.name).map(x=>({name:String(x.name).trim(),price:String(x.price==null?"":x.price).trim()})).filter(x=>x.name); }
+    catch(e){ items=[]; }
+    if(!items.length){ inner.innerHTML=`<h2>⚠️ ما طلع شي واضح من الصورة</h2><p class="sub">جرّب صورة أوضح وأقرب، أو أضف الأغراض يدوياً. هذا اللي رجع:</p><textarea readonly style="font-family:monospace;font-size:0.75rem;direction:ltr;height:110px;">${esc(res.text.slice(0,600))}</textarea>`+closeBtn("إغلاق"); bindClose(); return; }
+    drawReview();
+  })();
+  function drawReview(){
+    inner.innerHTML=`<h2>📷 راجع قبل الإضافة</h2><p class="sub">القراءة الآلية ممكن تغلط — صحّح أو احذف أي سطر قبل التأكيد.</p>
+      <div id="rcptRows">${items.map((it,i)=>`<div class="row" style="gap:6px;margin-top:8px;"><input type="text" class="rcptName" data-i="${i}" value="${esc(it.name)}" style="flex:2;"><input type="text" class="rcptPrice" data-i="${i}" value="${esc(it.price)}" placeholder="السعر" style="flex:1;" inputmode="decimal"><button class="iconbtn" data-rcpt-del="${i}">✕</button></div>`).join("")}</div>
+      <button class="btn" id="rcptOk" style="margin-top:14px;">أضفهم كمشتريات (${items.length}) ✅</button>`+closeBtn("إلغاء");
+    const sync=()=>{ inner.querySelectorAll(".rcptName").forEach(el=>{ items[el.dataset.i].name=el.value; });
+                     inner.querySelectorAll(".rcptPrice").forEach(el=>{ items[el.dataset.i].price=el.value; }); };
+    inner.querySelectorAll("[data-rcpt-del]").forEach(b=>b.onclick=()=>{ sync(); items.splice(parseInt(b.dataset.rcptDel),1);
+      if(!items.length){ modal.remove(); toast("ما انضاف شي."); return; } drawReview(); });
+    bindClose();
+    document.getElementById("rcptOk").onclick=()=>{ sync(); const keep=items.filter(it=>it.name.trim()); if(!keep.length) return toast("ما فيه أسماء.");
+      modal.remove(); keep.forEach(it=>addRestock(it.name.trim(),"",it.price.trim(),"من فاتورة",true)); toast(`✅ انضاف ${keep.length} غرض للمشتريات`); };
+  }
 }
 
 // ================= BIND =================
 let pendingFreq="daily", pendingDays=[];
 function bindView(){
-  document.querySelectorAll("[data-go]").forEach(b=>b.onclick=()=>{ currentView=b.dataset.go; render(); });
+  document.querySelectorAll("[data-go]").forEach(b=>b.onclick=()=>{ currentView=b.dataset.go; selectedTag=null; render(); });
   document.querySelectorAll("[data-toggle-chore]").forEach(b=>b.onclick=(e)=>{ e.stopPropagation(); toggleChoreDone(b.dataset.toggleChore, b.dataset.date); });
   document.querySelectorAll("[data-del-chore]").forEach(b=>b.onclick=()=>{ if(confirm("حذف المهمة؟")) deleteChore(b.dataset.delChore); });
   document.querySelectorAll("[data-toggle-restock]").forEach(b=>b.onclick=()=>toggleRestock(b.dataset.toggleRestock));
   document.querySelectorAll("[data-del-restock]").forEach(b=>b.onclick=()=>deleteRestock(b.dataset.delRestock));
   document.querySelectorAll("[data-del-complaint]").forEach(b=>b.onclick=()=>{ if(confirm("حذف من السجل؟")) deleteComplaint(b.dataset.delComplaint); });
   document.querySelectorAll("[data-del-rule]").forEach(b=>b.onclick=()=>{ if(confirm("حذف القاعدة؟")) deleteAgreedRule(b.dataset.delRule); });
+  document.querySelectorAll("[data-del-case]").forEach(b=>b.onclick=()=>{ if(confirm("حذف القضية نهائياً؟ الكلام الخاص فيها ينحذف من هذا الجوال.")) deleteCase(b.dataset.delCase); });
+  document.querySelectorAll("[data-tag]").forEach(b=>b.onclick=()=>{ selectedTag=b.dataset.tag||null; render(); });
   document.querySelectorAll("[data-confirm-kudos]").forEach(b=>b.onclick=()=>toggleKudosConfirm(b.dataset.confirmKudos));
   document.querySelectorAll("[data-del-kudos]").forEach(b=>b.onclick=()=>{ if(confirm("حذف؟")) deleteKudos(b.dataset.delKudos); });
   document.querySelectorAll("[data-cal]").forEach(d=>d.onclick=()=>{ calSelected=calSelected===d.dataset.cal?null:d.dataset.cal; render(); });
@@ -790,7 +927,16 @@ function bindView(){
     $("addChoreBtn").onclick=()=>{ const t=$("newChoreTitle").value.trim(); if(!t) return toast("اكتب اسم المهمة أول."); if(pendingFreq==="days"&&!pendingDays.length) return toast("اختر يوم واحد على الأقل."); addChore(t,$("newChoreAssignee").value,pendingFreq,pendingDays); pendingFreq="daily"; pendingDays=[]; };
   }
   if(currentView==="today"){ const ak=$("addKudosBtn"); if(ak) ak.onclick=()=>{ const v=$("kudosInput").value.trim(); if(!v) return toast("اكتب وش سويت أول."); addKudos(v); }; }
-  if(currentView==="restock"){ $("addRestockBtn").onclick=()=>{ const n=$("rName").value.trim(); if(!n) return toast("اكتب اسم الشي أول."); addRestock(n,$("rQty").value.trim(),$("rPrice").value.trim(),$("rNote").value.trim()); }; }
+  if(currentView==="restock"){
+    $("addRestockBtn").onclick=()=>{ const raw=$("rName").value.trim(); if(!raw) return toast("اكتب اسم الشي أول.");
+      // read every field before the first addRestock(), which re-renders and wipes the inputs
+      const qty=$("rQty").value.trim(), price=$("rPrice").value.trim(), note=$("rNote").value.trim();
+      const parts=raw.split(/\s*(?:,|،)\s*|\s+و\s+/).map(x=>x.trim()).filter(Boolean);
+      if(parts.length>1){ parts.forEach(x=>addRestock(x,"","",note)); toast(`تمت إضافة ${parts.length} أغراض`); }
+      else addRestock(parts[0],qty,price,note); };
+    const sr=$("scanReceiptBtn"); if(sr) sr.onclick=()=>$("receiptFile").click();
+    const rf=$("receiptFile"); if(rf) rf.onchange=()=>{ const f=rf.files&&rf.files[0]; rf.value=""; if(f) openReceiptModal(f); };
+  }
   if(currentView==="complaints"){ $("startCaseBtn").onclick=()=>{ const c=newCase(state.settings.members.find(m=>m.id!==meId).id,""); openCaseModal(c.id); }; const rc=$("receiveCaseBtn"); if(rc) rc.onclick=openReceiveCodeModal; }
   if(currentView==="more"){
     const sw=$("switchUserBtn"); if(sw) sw.onclick=()=>{ meId=null; try{localStorage.removeItem(LS_ME);}catch(e){} render(); };
@@ -831,7 +977,7 @@ function bindView(){
 let cloudStarted=false; function initCloudOnce(){ if(cloudStarted) return; cloudStarted=true; initCloud(); }
 window.addEventListener("error",ev=>{ try{ toast("⚠️ خطأ: "+(ev.message||"غير معروف")); }catch(e){} });
 window.addEventListener("unhandledrejection",ev=>{ try{ toast("⚠️ خطأ: "+((ev.reason&&(ev.reason.code||ev.reason.message))||"غير معروف")); }catch(e){} });
-document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{ currentView=t.dataset.view; settingsView=null; render(); });
+document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{ currentView=t.dataset.view; settingsView=null; selectedTag=null; render(); });
 render();
 if(FIREBASE_CONFIG_BROKEN) setTimeout(()=>toast("⚠️ إعدادات Firebase فيها خطأ إملائي. التطبيق يشتغل بدون سحابة."),800);
 if(meId) initCloudOnce();
