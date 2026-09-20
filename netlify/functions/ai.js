@@ -38,9 +38,18 @@ const TEMPERATURE = (() => {
   return Number.isFinite(raw) && raw >= 0 && raw <= 2 ? raw : 0.3;
 })();
 
+// Not every $0 model carries the ":free" suffix — some are simply priced at zero.
+// The suffix check alone would block those, so EXTRA_ALLOWED_MODELS is an explicit
+// per-slug opt-in: listing one there asserts you checked its price on OpenRouter.
+// It stays an opt-in rather than a loosened rule so that a paid slug can never be
+// used by accident — which is the whole point, given OpenRouter's own 404 body
+// recommends the paid version of a retired model.
+const EXTRA_ALLOWED_MODELS = (process.env.EXTRA_ALLOWED_MODELS || "").split(",").map(m => m.trim()).filter(Boolean);
+function isAllowedModel(slug) { return slug.endsWith(":free") || EXTRA_ALLOWED_MODELS.includes(slug); }
+
 function modelList(envValue, fallback) {
   const raw = (envValue || fallback).split(",").map(m => m.trim()).filter(Boolean);
-  return { use: raw.filter(m => m.endsWith(":free")), rejected: raw.filter(m => !m.endsWith(":free")) };
+  return { use: raw.filter(isAllowedModel), rejected: raw.filter(m => !isAllowedModel(m)) };
 }
 
 // Pull a human-readable reason out of whatever the upstream returned.
@@ -98,6 +107,7 @@ exports.handler = async (event) => {
         error: key ? undefined : "AI_API_KEY not set on server",
         textModels: text.use, visionModels: vision.use,
         ignoredNotFree: [...new Set([...text.rejected, ...vision.rejected])],
+        extraAllowed: EXTRA_ALLOWED_MODELS,
         providerOrder: PROVIDER_ORDER, providerStrict: PROVIDER_STRICT, temperature: TEMPERATURE
       })
     };
@@ -111,7 +121,8 @@ exports.handler = async (event) => {
     if (!picked.use.length) {
       return { statusCode: 503, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ error: { message:
         `No free model configured${picked.rejected.length ? ` — these were ignored for not ending in ":free": ${picked.rejected.join(", ")}` : ""}. `
-        + `Set ${wantsVision ? "VISION_MODELS" : "TEXT_MODELS"} in Netlify to a ":free" slug from https://openrouter.ai/models?max_price=0` } }) };
+        + `Set ${wantsVision ? "VISION_MODELS" : "TEXT_MODELS"} in Netlify to a ":free" slug from https://openrouter.ai/models?max_price=0. `
+        + `If a model really is $0 but has no ":free" suffix, add its exact slug to EXTRA_ALLOWED_MODELS — that is an assertion you checked its price.` } }) };
     }
 
     const orMessages = system ? [{ role: "system", content: system }, ...(messages || [])] : (messages || []);
