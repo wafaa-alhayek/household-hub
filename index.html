@@ -399,7 +399,25 @@ function isDueToday(c, dateStr){
   return true;
 }
 function isMine(c){ return c.assignee===meId||c.assignee==="anyone"; }
-function addChore(title,assignee,freq,days){ const it=touch({id:uid(),title,assignee,freq,days:days||[],log:{},createdAt:Date.now()}); state.chores.push(it); saveState(); if(cloud) cloud.push("chores",it); render(); }
+function addChore(title,assignee,freq,days,rotation){ const it=touch({id:uid(),title,assignee,freq,days:days||[],rotation:rotation||[],log:{},createdAt:Date.now()}); state.chores.push(it); saveState(); if(cloud) cloud.push("chores",it); render(); }
+// Whose turn it is, DERIVED from the completion log rather than stored as a counter:
+// a stored index would fight itself under last-write-wins merge, and deriving also
+// self-corrects when somebody covers out of turn (the person they covered for is still next).
+function whoseTurn(c){
+  const rot=(c.rotation||[]).filter(id=>state.settings.members.some(m=>m.id===id));
+  if(rot.length<2) return null;
+  const dates=Object.keys(c.log||{}).sort();
+  for(let i=dates.length-1;i>=0;i--){ const idx=rot.indexOf((c.log[dates[i]]||{}).by); if(idx>=0) return rot[(idx+1)%rot.length]; }
+  return rot[0];
+}
+// "when did we last do this" matters far more for as-needed jobs than for scheduled ones
+function lastDone(c){
+  const dates=Object.keys(c.log||{}).sort();
+  if(!dates.length) return null;
+  const d=dates[dates.length-1];
+  return {date:d, by:(c.log[d]||{}).by, days:Math.round((new Date(todayStr()+"T12:00:00")-new Date(d+"T12:00:00"))/86400000)};
+}
+function agoLabel(n){ return n<=0?"اليوم":n===1?"أمس":n<=10?`قبل ${["","يوم","يومين","٣ أيام","٤ أيام","٥ أيام","٦ أيام","٧ أيام","٨ أيام","٩ أيام","١٠ أيام"][n]}`:`قبل ${n} يوم`; }
 function toggleChoreDone(id, dateStr){
   const c=state.chores.find(x=>x.id===id); if(!c) return; const ds=dateStr||todayStr();
   if(c.log[ds] && c.log[ds].by===meId){ delete c.log[ds]; } else if(!c.log[ds]){ c.log[ds]={by:meId,at:Date.now()}; toast("تم! 👍"); }
@@ -545,8 +563,11 @@ function renderToday(){
     </div>
     ${anytime.length?`<div class="card"><strong>🗂️ مهام حسب الحاجة</strong>
       <p class="sub" style="margin-top:4px;">مو مجدولة — سوّها لما تحتاج، وتنحسب لك مثل باقي المهام.</p>
-      ${anytime.map(c=>{ const dt=c.log[t];
-        return `<div class="item"><div class="title-line"><div><strong>${esc(c.title)}</strong><div class="meta">${c.assignee==="anyone"?"أي أحد":esc(memberName(c.assignee))}</div></div>${dt?`<span class="done-badge">✓ ${esc(memberName(dt.by))} اليوم</span>`:`<button class="btn small" data-toggle-chore="${c.id}">سويتها</button>`}</div></div>`; }).join("")}
+      ${anytime.map(c=>{ const dt=c.log[t], turn=whoseTurn(c), ld=lastDone(c), mine=turn===meId;
+        return `<div class="item"><div class="title-line"><div><strong>${esc(c.title)}</strong>
+            <div class="meta">${turn?`🔄 ${mine?`<strong style="color:${memberColor(meId)}">الدور عليك</strong>`:`الدور على ${esc(memberName(turn))}`}`:(c.assignee==="anyone"?"أي أحد":esc(memberName(c.assignee)))}</div>
+            <div class="meta">${ld?`آخر مرة: ${esc(memberName(ld.by))} · ${agoLabel(ld.days)}`:"ما انسوت بعد"}</div>
+          </div>${dt?`<span class="done-badge">✓ ${esc(memberName(dt.by))} اليوم</span>`:`<button class="btn small ${turn&&!mine?"secondary":""}" data-toggle-chore="${c.id}">سويتها</button>`}</div></div>`; }).join("")}
     </div>`:""}
     <div class="card"><strong>🏆 هذا الأسبوع</strong>
       ${week.sort((a,b)=>b.n-a.n).map((w,i)=>`<div class="lb"><span style="width:28px;">${["🥇","🥈","🥉"][i]||""}</span><span style="width:70px;">${esc(w.m.name)}</span><div class="bar"><i style="width:${Math.round(w.n/max*100)}%;background:${memberColor(w.m.id)}"></i></div><b>${w.n}</b></div>`).join("")}
@@ -564,11 +585,16 @@ function renderChores(){
       <label class="f">متى؟</label>
       <div class="row" id="freqRow"><button class="daybtn sel" data-freq="daily">كل يوم</button><button class="daybtn" data-freq="days">أيام معينة</button><button class="daybtn" data-freq="once">مرة وحدة</button><button class="daybtn" data-freq="anytime">عند الحاجة</button></div>
       <div class="row" id="daysRow" style="display:none;margin-top:8px;">${DOW_ORDER.map(d=>`<button class="daybtn" data-day="${d}">${DOW_S[d]}</button>`).join("")}</div>
+      <div id="rotRow" style="display:none;margin-top:10px;">
+        <label class="f" style="margin-top:0;">بالدور بين مين؟ <span class="meta">(اختياري)</span></label>
+        <div class="row" style="flex-wrap:wrap;gap:6px;">${state.settings.members.map(m=>`<button class="daybtn" data-rot="${m.id}">${esc(m.name)}</button>`).join("")}</div>
+        <p class="footer-note" style="margin-top:6px;">اختر شخصين أو أكثر، وكل ما أحد يسويها ينتقل الدور للي بعده.</p>
+      </div>
       <button class="btn" id="addChoreBtn" style="margin-top:12px;">إضافة</button></div>
     <div class="card">${renderCalendar()}</div>
     <div class="card"><strong>كل المهام</strong>
       ${items.length===0?`<p class="sub">ما فيه مهام بعد.</p>`:items.map(c=>{ const dt=c.log[t];
-        return `<div class="item"><div class="title-line"><div><strong>${esc(c.title)}</strong><div class="meta"><span style="color:${c.assignee==="anyone"?"inherit":memberColor(c.assignee)}">${c.assignee==="anyone"?"أي أحد":esc(memberName(c.assignee))}</span> · ${c.freq==="daily"||c.freq==="weekly"?"كل يوم":c.freq==="days"?(c.days||[]).map(d=>DOW_S[d]).join(" "):c.freq==="anytime"?"عند الحاجة":"مرة وحدة"}</div></div><button class="iconbtn" data-del-chore="${c.id}">✕</button></div>
+        return `<div class="item"><div class="title-line"><div><strong>${esc(c.title)}</strong><div class="meta"><span style="color:${c.assignee==="anyone"?"inherit":memberColor(c.assignee)}">${(c.rotation||[]).length>1?"🔄 بالدور: "+c.rotation.map(id=>esc(memberName(id))).join(" ← "):c.assignee==="anyone"?"أي أحد":esc(memberName(c.assignee))}</span> · ${c.freq==="daily"||c.freq==="weekly"?"كل يوم":c.freq==="days"?(c.days||[]).map(d=>DOW_S[d]).join(" "):c.freq==="anytime"?"عند الحاجة":"مرة وحدة"}</div></div><button class="iconbtn" data-del-chore="${c.id}">✕</button></div>
           <div style="margin-top:10px;">${dt?`<span class="done-badge">✓ ${esc(memberName(dt.by))} اليوم</span>`:isDueToday(c)?`<button class="btn small" data-toggle-chore="${c.id}">سويتها اليوم ✅</button>`:`<span class="meta">مو مطلوبة اليوم</span>`}</div></div>`; }).join("")}
     </div>`;
 }
@@ -901,7 +927,7 @@ function openReceiptModal(file){
 }
 
 // ================= BIND =================
-let pendingFreq="daily", pendingDays=[];
+let pendingFreq="daily", pendingDays=[], pendingRotation=[];
 function bindView(){
   document.querySelectorAll("[data-go]").forEach(b=>b.onclick=()=>{ currentView=b.dataset.go; selectedTag=null; render(); });
   document.querySelectorAll("[data-toggle-chore]").forEach(b=>b.onclick=(e)=>{ e.stopPropagation(); toggleChoreDone(b.dataset.toggleChore, b.dataset.date); });
@@ -922,9 +948,14 @@ function bindView(){
   document.querySelectorAll("[data-set-back]").forEach(b=>b.onclick=()=>{ settingsView=null; render(); });
   const $=(id)=>document.getElementById(id);
   if(currentView==="chores"){
-    document.querySelectorAll("[data-freq]").forEach(b=>b.onclick=()=>{ pendingFreq=b.dataset.freq; document.querySelectorAll("[data-freq]").forEach(x=>x.classList.toggle("sel",x===b)); $("daysRow").style.display=pendingFreq==="days"?"flex":"none"; });
+    document.querySelectorAll("[data-freq]").forEach(b=>b.onclick=()=>{ pendingFreq=b.dataset.freq; document.querySelectorAll("[data-freq]").forEach(x=>x.classList.toggle("sel",x===b)); $("daysRow").style.display=pendingFreq==="days"?"flex":"none"; $("rotRow").style.display=pendingFreq==="anytime"?"block":"none"; });
+    document.querySelectorAll("[data-rot]").forEach(b=>b.onclick=()=>{ const id=b.dataset.rot; pendingRotation=pendingRotation.includes(id)?pendingRotation.filter(x=>x!==id):[...pendingRotation,id]; b.classList.toggle("sel"); });
     document.querySelectorAll("[data-day]").forEach(b=>b.onclick=()=>{ const d=parseInt(b.dataset.day); pendingDays=pendingDays.includes(d)?pendingDays.filter(x=>x!==d):[...pendingDays,d]; b.classList.toggle("sel"); });
-    $("addChoreBtn").onclick=()=>{ const t=$("newChoreTitle").value.trim(); if(!t) return toast("اكتب اسم المهمة أول."); if(pendingFreq==="days"&&!pendingDays.length) return toast("اختر يوم واحد على الأقل."); addChore(t,$("newChoreAssignee").value,pendingFreq,pendingDays); pendingFreq="daily"; pendingDays=[]; };
+    $("addChoreBtn").onclick=()=>{ const t=$("newChoreTitle").value.trim(); if(!t) return toast("اكتب اسم المهمة أول."); if(pendingFreq==="days"&&!pendingDays.length) return toast("اختر يوم واحد على الأقل.");       const rot=pendingFreq==="anytime"?pendingRotation.slice():[];
+      if(rot.length===1) return toast("الدور يحتاج شخصين على الأقل.");
+      // a rotating job belongs to whoever's turn it is, so it must not be pinned to one person
+      addChore(t, rot.length?"anyone":$("newChoreAssignee").value, pendingFreq, pendingDays, rot);
+      pendingFreq="daily"; pendingDays=[]; pendingRotation=[]; };
   }
   if(currentView==="today"){ const ak=$("addKudosBtn"); if(ak) ak.onclick=()=>{ const v=$("kudosInput").value.trim(); if(!v) return toast("اكتب وش سويت أول."); addKudos(v); }; }
   if(currentView==="restock"){
