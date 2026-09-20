@@ -17,6 +17,27 @@
 const DEFAULT_TEXT_MODELS = "google/gemma-4-31b-it:free";
 const DEFAULT_VISION_MODELS = "google/gemma-4-31b-it:free";
 
+// One OpenRouter model is served by several upstream providers, and they don't
+// answer identically — different quantisation and settings shift both wording and
+// how reliably JSON comes back. PROVIDER_ORDER pins the preference order by
+// provider name (comma-separated, exactly as OpenRouter spells them).
+//
+// PROVIDER_STRICT=1 additionally forbids falling back to any other provider.
+// That buys the most consistency and costs the most availability: when the pinned
+// provider is rate-limited there is nowhere else to go, and the request fails
+// instead of quietly using a different one. Leave it off unless consistency
+// matters more than the app answering at all.
+const PROVIDER_ORDER = (process.env.PROVIDER_ORDER || "").split(",").map(x => x.trim()).filter(Boolean);
+const PROVIDER_STRICT = /^(1|true|yes)$/i.test(process.env.PROVIDER_STRICT || "");
+
+// Sampling temperature. Unset previously, which meant each provider's own default
+// — usually ~1.0, the least repeatable setting there is. Most calls here ask for
+// strict JSON, so a low value makes both the tone and the parsing far steadier.
+const TEMPERATURE = (() => {
+  const raw = parseFloat(process.env.AI_TEMPERATURE);
+  return Number.isFinite(raw) && raw >= 0 && raw <= 2 ? raw : 0.3;
+})();
+
 function modelList(envValue, fallback) {
   const raw = (envValue || fallback).split(",").map(m => m.trim()).filter(Boolean);
   return { use: raw.filter(m => m.endsWith(":free")), rejected: raw.filter(m => !m.endsWith(":free")) };
@@ -46,15 +67,19 @@ async function tryModelWithRetry(model, key, orMessages, max_tokens) {
   return r;
 }
 async function tryModel(model, key, orMessages, max_tokens) {
+  const payload = { model, messages: orMessages, max_tokens, temperature: TEMPERATURE, reasoning: { enabled: false } };
+  if (PROVIDER_ORDER.length) payload.provider = { order: PROVIDER_ORDER, allow_fallbacks: !PROVIDER_STRICT };
   const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
-    body: JSON.stringify({ model, messages: orMessages, max_tokens, reasoning: { enabled: false } })
+    body: JSON.stringify(payload)
   });
   if (!res.ok) return { ok: false, status: res.status, text: await res.text() };
   const data = await res.json();
   const text = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || "";
-  return { ok: true, text };
+  // Which provider actually served this — you can't pin one until you can see
+  // which ones your model is being routed through.
+  return { ok: true, text, provider: data.provider || "" };
 }
 
 exports.handler = async (event) => {
@@ -72,7 +97,8 @@ exports.handler = async (event) => {
         ok: !!key,
         error: key ? undefined : "AI_API_KEY not set on server",
         textModels: text.use, visionModels: vision.use,
-        ignoredNotFree: [...new Set([...text.rejected, ...vision.rejected])]
+        ignoredNotFree: [...new Set([...text.rejected, ...vision.rejected])],
+        providerOrder: PROVIDER_ORDER, providerStrict: PROVIDER_STRICT, temperature: TEMPERATURE
       })
     };
   }
@@ -92,7 +118,8 @@ exports.handler = async (event) => {
     const attempts = [];
     for (const model of picked.use) {
       const r = await tryModelWithRetry(model, key, orMessages, max_tokens || 600);
-      if (r.ok) return { statusCode: 200, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: [{ type: "text", text: r.text }] }) };
+      if (r.ok) return { statusCode: 200, headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: [{ type: "text", text: r.text }], model, provider: r.provider || "" }) };
       attempts.push({ model, status: r.status, message: upstreamMessage(r.text), retried: !!r.retried });
     }
 
@@ -113,6 +140,7 @@ exports.handler = async (event) => {
         ? ` || RATE LIMITED, not retired — the model is fine, the free quota is spent. ${picked.use.length === 1
             ? `Only one model is configured, so there was nothing to fall back to: add more ":free" slugs to ${wantsVision ? "VISION_MODELS" : "TEXT_MODELS"} (comma-separated, different providers) so one provider's limit doesn't stop the app.`
             : `All ${picked.use.length} configured models are limited right now.`} OpenRouter also raises the free-tier daily cap once the account holds credit — check the limits on your key's page.`
+          + (PROVIDER_STRICT && PROVIDER_ORDER.length ? ` NOTE: PROVIDER_STRICT is on and pinned to ${PROVIDER_ORDER.join(", ")}, so no other provider could be tried. Unset it to let the request fall back.` : "")
         : "") } })
     };
   } catch (e) {

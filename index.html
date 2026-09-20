@@ -254,7 +254,7 @@ async function callAI(systemPrompt, turns){
     }
     const data=await res.json();
     const text=(data.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("\n");
-    return {ok:true, text};
+    return {ok:true, text, provider:data.provider||"", model:data.model||""};
   }catch(e){ return {ok:false, reason:"ما قدرنا نوصل للمساعد — تأكد من الإنترنت. "+(e&&e.message?e.message:"")}; }
 }
 
@@ -1249,7 +1249,12 @@ function bindView(){
     if(settingsView==="ai"){
       $("testAiBtn").onclick=async()=>{ $("testAiOut").textContent="جاري الاختبار…";
         const r=await callAI("رد بكلمة واحدة فقط: جاهز", [{role:"user",content:"اختبار"}]);
-        if(r.ok){ $("testAiOut").innerHTML=`<span class="badge-ok">✅ المساعد يشتغل — رد: ${esc(r.text)}</span>`; return; }
+        if(r.ok){
+          // Name the model and provider that answered: you can't pin a provider
+          // for consistency until you can see which one you're actually getting.
+          $("testAiOut").innerHTML=`<span class="badge-ok">✅ المساعد يشتغل — رد: ${esc(r.text)}</span>`
+            +(r.model?`\n\nالنموذج: ${esc(r.model)}`:"")+(r.provider?`\nالمزوّد: ${esc(r.provider)}`:"");
+          return; }
         // On failure, show which models the server is actually configured with —
         // otherwise diagnosing a retired free model means reading Netlify's logs.
         let cfg="";
