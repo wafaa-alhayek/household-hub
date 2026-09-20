@@ -155,7 +155,9 @@ const VAPID_PUBLIC_KEY = "BNHcQJh7XtObdVi9Dy3LczET1mZRwFPJ0Kn_TjPttoajiCtzy0-ZoS
 const LS_STATE="hh_state_ar_v2", LS_ME="hh_me_ar_v1", LS_KEY="hh_api_key_v1", LS_CASES="hh_cases_v1",
       LS_PERSONA="hh_persona_v1", LS_BOOKRULES="hh_bookrules_v1", LS_BOOKMETA="hh_bookmeta_v1",
       LS_FAMILY="hh_family_code_v1", LS_USE_QURAN_FW="hh_use_quranfw_v1",
-      LS_FONTSIZE="hh_fontsize_v1", LS_LASTSEEN="hh_lastseen_v1";
+      LS_FONTSIZE="hh_fontsize_v1", LS_LASTSEEN="hh_lastseen_v1",
+      LS_CHORETALKS="hh_choretalks_v1", LS_NUDGESNOOZE="hh_chorenudge_v1";
+const NUDGE_WINDOW=14, NUDGE_MIN_MISSES=3, NUDGE_SNOOZE_DAYS=14;
 const FS_MIN=17, FS_MAX=28, FS_DEFAULT=19;
 const MEMBER_COLORS=["#c1673b","#4a7fb5","#5a8f5f"];
 const SYNCED_COLLECTIONS=["chores","restock","complaints","kudos","agreedRules","pushSubs"];
@@ -339,7 +341,7 @@ async function initCloud(){
       push:(col,item)=>fsM.setDoc(fsM.doc(db,"families",fam,col,item.id),item).catch(e=>console.warn("push",e)),
       remove:(col,id)=>fsM.deleteDoc(fsM.doc(db,"families",fam,col,id)).catch(e=>console.warn("del",e)),
       pushSettings:()=>fsM.setDoc(settingsRef,{members:state.settings.members,profiles:state.settings.profiles||{},aiKey:state.settings.aiKey||"",updatedAt:Date.now()}).catch(e=>console.warn("settings",e)),
-      pushCase:(c)=>fsM.setDoc(fsM.doc(db,"families",fam,"cases",c.id),{id:c.id,from:c.from,about:c.about,title:c.title,stage:c.stage,neutralSummary:c.neutralSummary||"",suggestions:c.suggestions||[],proposedResolution:c.proposedResolution||"",noteFromSender:c.noteFromSender||"",noteFromResponder:c.noteFromResponder||"",tag:c.tag||"",takeaway:c.takeaway||"",sentAt:c.sentAt||0,openedAt:c.openedAt||0,round:c.round||1,rounds:c.rounds||[],updatedAt:Date.now()}).catch(e=>console.warn("case",e))
+      pushCase:(c)=>fsM.setDoc(fsM.doc(db,"families",fam,"cases",c.id),{id:c.id,from:c.from,about:c.about,title:c.title,stage:c.stage,neutralSummary:c.neutralSummary||"",suggestions:c.suggestions||[],proposedResolution:c.proposedResolution||"",noteFromSender:c.noteFromSender||"",noteFromResponder:c.noteFromResponder||"",tag:c.tag||"",choreId:c.choreId||"",choreTitle:c.choreTitle||"",takeaway:c.takeaway||"",sentAt:c.sentAt||0,openedAt:c.openedAt||0,round:c.round||1,rounds:c.rounds||[],updatedAt:Date.now()}).catch(e=>console.warn("case",e))
     };
     let seeded=lsGet("hh_cloud_seeded_"+fam)==="1";
     if(!seeded){ for(const col of SYNCED_COLLECTIONS) for(const it of state[col]) await cloud.push(col,it); await cloud.pushSettings(); lsSet("hh_cloud_seeded_"+fam,"1"); }
@@ -358,7 +360,7 @@ async function initCloud(){
     fsM.onSnapshot(root("cases"), qs=>{
       let changed=false;
       qs.forEach(d=>{ const r=d.data(); let local=findCase(r.id);
-        if(r.about===meId && r.stage==="sent" && !local){ cases.push({id:r.id,from:r.from,about:meId,title:r.title,tag:r.tag||"",stage:"received",threadA:[],neutralSummary:r.neutralSummary,suggestions:r.suggestions||[],threadB:[],proposedResolution:"",noteFromSender:r.noteFromSender||"",noteFromResponder:"",takeaway:"",sentAt:r.sentAt||0,openedAt:0,round:r.round||1,rounds:r.rounds||[],createdAt:Date.now()}); changed=true; toast(`📩 وصلتك رسالة من ${memberName(r.from)}`); }
+        if(r.about===meId && r.stage==="sent" && !local){ cases.push({id:r.id,from:r.from,about:meId,title:r.title,tag:r.tag||"",choreId:r.choreId||"",choreTitle:r.choreTitle||"",stage:"received",threadA:[],neutralSummary:r.neutralSummary,suggestions:r.suggestions||[],threadB:[],proposedResolution:"",noteFromSender:r.noteFromSender||"",noteFromResponder:"",takeaway:"",sentAt:r.sentAt||0,openedAt:0,round:r.round||1,rounds:r.rounds||[],createdAt:Date.now()}); changed=true; toast(`📩 وصلتك رسالة من ${memberName(r.from)}`); }
         // sender revised before this phone opened it — refresh the inbox copy in place
         if(r.about===meId && r.stage==="sent" && local && !local.openedAt && (r.round||1)===(local.round||1) && (local.neutralSummary!==r.neutralSummary || (local.noteFromSender||"")!==(r.noteFromSender||""))){
           local.neutralSummary=r.neutralSummary; local.suggestions=r.suggestions||[]; local.noteFromSender=r.noteFromSender||""; local.stage="received"; changed=true; toast(`✏️ عدّل ${memberName(r.from)} رسالته`); }
@@ -425,6 +427,35 @@ function isDueToday(c, dateStr){
   if(c.freq==="once") return Object.keys(c.log||{}).length===0;
   return true;
 }
+function freqLabel(c){ return c.freq==="daily"||c.freq==="weekly"?"كل يوم":c.freq==="days"?(c.days||[]).map(d=>DOW[d]).join("، "):c.freq==="anytime"?"عند الحاجة":"مرة وحدة"; }
+// Only scheduled chores can be "missed" — a one-off or an as-needed job has no
+// day it was supposed to happen on, so counting misses for them is meaningless.
+function nudgeable(c){ return c.freq==="daily"||c.freq==="weekly"||c.freq==="days"; }
+function missedRecord(c, days){
+  const t=todayStr(); let due=0, done=0; const missedDates=[];
+  for(let i=1;i<=(days||NUDGE_WINDOW);i++){ const ds=addDays(t,-i);   // from yesterday: today isn't missed yet
+    if(!isDueToday(c,ds)) continue;
+    due++;
+    if(c.log&&c.log[ds]) done++; else missedDates.push(ds);
+  }
+  return {due, done, missed:missedDates.length, missedDates};
+}
+function choreFactsText(c){
+  const r=missedRecord(c);
+  return `المهمة: ${c.title}\nالمسؤول: ${c.assignee==="anyone"?"أي أحد":memberName(c.assignee)}\nالتكرار: ${freqLabel(c)}\n`+
+    `آخر ${NUDGE_WINDOW} يوم: مطلوبة ${r.due} مرة، انسوت ${r.done} مرة، ما انسوت ${r.missed} مرة`;
+}
+// Arabic counts its plurals differently at 1, 2, 3-10 and 11+; getting it wrong
+// reads as broken to a native speaker, which matters on a screen aimed at one.
+function timesAr(n){ return n===1?"مرة":n===2?"مرتين":(n>=3&&n<=10)?`${ar(n)} مرات`:`${ar(n)} مرة`; }
+function choreFactsLine(c){ const r=missedRecord(c);
+  return `ما انسوت ${timesAr(r.missed)} من أصل ${ar(r.due)} خلال ${ar(NUDGE_WINDOW)} يوم`; }
+function nudgeSnoozed(id){ const sn=loadJSON(LS_NUDGESNOOZE,{}); return (sn[id]||0)>Date.now(); }
+function snoozeNudge(id){ const sn=loadJSON(LS_NUDGESNOOZE,{}); sn[id]=Date.now()+NUDGE_SNOOZE_DAYS*86400000; saveJSON(LS_NUDGESNOOZE,sn); }
+// Only ever computed for the person themselves — this list is never shown to anyone else.
+function myStrugglingChores(){
+  return state.chores.filter(c=>c.assignee===meId && nudgeable(c) && !nudgeSnoozed(c.id) && missedRecord(c).missed>=NUDGE_MIN_MISSES);
+}
 function isMine(c){ return c.assignee===meId||c.assignee==="anyone"; }
 function addChore(title,assignee,freq,days,rotation){ const it=touch({id:uid(),title,assignee,freq,days:days||[],rotation:rotation||[],log:{},createdAt:Date.now()}); state.chores.push(it); saveState(); if(cloud) cloud.push("chores",it); render(); }
 // Whose turn it is, DERIVED from the completion log rather than stored as a counter:
@@ -472,7 +503,7 @@ function addAgreedRule(text,sourceCaseId,sourceTitle){ const it=touch({id:uid(),
 function deleteAgreedRule(id){ const it=state.agreedRules.find(r=>r.id===id); if(!it) return; const snap=JSON.parse(JSON.stringify(it));
   state.agreedRules=state.agreedRules.filter(r=>r.id!==id); saveState(); if(cloud) cloud.remove("agreedRules",id); render();
   deleteWithUndo("انحذفت القاعدة", ()=>{ state.agreedRules.push(touch(snap)); saveState(); if(cloud) cloud.push("agreedRules",snap); render(); }); }
-function newCase(about,title){ const c={id:uid(),from:meId,about,title,tag:"",stage:"draft_a",threadA:[],neutralSummary:"",suggestions:[],threadB:[],proposedResolution:"",noteFromSender:"",noteFromResponder:"",takeaway:"",sentAt:0,openedAt:0,round:1,rounds:[],createdAt:Date.now()}; cases.push(c); saveCases(); return c; }
+function newCase(about,title){ const c={id:uid(),from:meId,about,title,tag:"",choreId:"",choreTitle:"",stage:"draft_a",threadA:[],neutralSummary:"",suggestions:[],threadB:[],proposedResolution:"",noteFromSender:"",noteFromResponder:"",takeaway:"",sentAt:0,openedAt:0,round:1,rounds:[],createdAt:Date.now()}; cases.push(c); saveCases(); return c; }
 function deleteCase(id){ const it=findCase(id); if(!it) return; const snap=JSON.parse(JSON.stringify(it));
   cases=cases.filter(c=>c.id!==id); saveCases(); if(cloud) cloud.remove("cases",id); render();
   // the private thread goes with it, so this one especially must be recoverable
@@ -481,6 +512,12 @@ const MAX_ROUNDS=3;
 function roundNum(n){ return ["","١","٢","٣"][n]||n; }
 // snapshot of the round that just ended, so both phones keep the same history
 function archiveRound(c){ c.rounds=c.rounds||[]; c.rounds.push({n:c.round||1,neutralSummary:c.neutralSummary||"",suggestions:c.suggestions||[],noteFromSender:c.noteFromSender||"",proposedResolution:c.proposedResolution||"",noteFromResponder:c.noteFromResponder||"",takeaway:c.takeaway||""}); }
+// Chore-linked cases reason from the log, not from memory of "you never do it".
+function choreFactsForCase(c){
+  if(!c.choreId) return "";
+  const ch=state.chores.find(x=>x.id===c.choreId);
+  return ch?fenced("وقائع المهمة المسجلة",choreFactsText(ch)):"";
+}
 function roundsMapHTML(c){
   if(!c.rounds||!c.rounds.length) return "";
   return `<div class="card" style="margin:0 0 14px;padding:10px 12px;background:var(--chip);border:none;"><strong style="font-size:0.95rem;">🗺️ وين وصلنا</strong>
@@ -493,7 +530,7 @@ function privateThreadHTML(thread,label){
   return `<details style="margin-top:12px;"><summary style="cursor:pointer;color:var(--ink-dim);">📄 ${esc(label)}</summary><div class="chatbox" style="margin-top:8px;">${threadHTML(thread)}</div></details>`;
 }
 function findCase(id){ return cases.find(c=>c.id===id); }
-function buildPackage(c,side){ return btoa(unescape(encodeURIComponent(JSON.stringify({id:c.id,title:c.title,from:c.from,about:c.about,tag:c.tag||"",neutralSummary:c.neutralSummary,suggestions:c.suggestions,proposedResolution:c.proposedResolution,noteFromSender:c.noteFromSender,noteFromResponder:c.noteFromResponder,takeaway:c.takeaway||"",round:c.round||1,rounds:c.rounds||[],side})))); }
+function buildPackage(c,side){ return btoa(unescape(encodeURIComponent(JSON.stringify({id:c.id,title:c.title,from:c.from,about:c.about,tag:c.tag||"",choreId:c.choreId||"",choreTitle:c.choreTitle||"",neutralSummary:c.neutralSummary,suggestions:c.suggestions,proposedResolution:c.proposedResolution,noteFromSender:c.noteFromSender,noteFromResponder:c.noteFromResponder,takeaway:c.takeaway||"",round:c.round||1,rounds:c.rounds||[],side})))); }
 function readPackage(code){ try{ return JSON.parse(decodeURIComponent(escape(atob(code.trim())))); }catch(e){ return null; } }
 function exportCode(){ return btoa(unescape(encodeURIComponent(JSON.stringify(state)))); }
 function importCode(code){ try{ const inc=JSON.parse(decodeURIComponent(escape(atob(code.trim())))); if(inc.settings) state.settings=Object.assign(state.settings,inc.settings); ["chores","restock","complaints","kudos","agreedRules"].forEach(k=>{ if(inc[k]) state[k]=mergeArrayById(state[k],inc[k]); }); saveState(); return true; }catch(e){ return false; } }
@@ -619,6 +656,12 @@ function renderToday(){
       ${done.map(c=>`<div class="bigcheck done" data-toggle-chore="${c.id}"><div class="box">✓</div><div><div class="t">${esc(c.title)}</div></div></div>`).join("")}
       ${pending.length===0&&mine.length>0?`<p class="badge-ok" style="text-align:center;margin:10px 0 0;">خلصت كل شي اليوم 🏆</p>`:""}
     </div>
+    ${(()=>{ const sc=myStrugglingChores(); if(!sc.length) return "";
+      return `<div class="card"><strong>🕊️ فيه مهمة ما تمشي معك؟</strong>
+        <p class="sub" style="margin-top:4px;">هذا الكلام خاص فيك وحدك — ما أحد يشوفه، وما ينرسل لأحد إلا إذا أنت اخترت.</p>
+        ${sc.map(c=>`<div class="item"><div class="title-line"><div><strong>${esc(c.title)}</strong><div class="meta">${esc(choreFactsLine(c))}</div></div></div>
+          <div class="row" style="gap:6px;margin-top:8px;"><button class="btn small" data-talk-chore="${c.id}">تكلم عنها</button><button class="btn small secondary" data-snooze-chore="${c.id}">مو الحين</button></div></div>`).join("")}
+      </div>`; })()}
     <div class="card"><strong>🙏 سويت شي اليوم؟</strong>
       <p class="sub" style="margin-top:4px;">اكتب أي شي سويته — حتى إذا مو مجدول. غيرك يقدر يأكّده.</p>
       <textarea id="kudosInput" placeholder="مثلاً: رتبت المطبخ، وديت الجهاز للصيانة…" style="min-height:56px;"></textarea>
@@ -667,8 +710,32 @@ function renderChores(){
     <div class="card"><strong>كل المهام</strong>
       ${items.length===0?`<p class="sub">ما فيه مهام بعد — أضف أول مهمة من فوق ☝️</p>`:items.map(c=>{ const dt=c.log[t];
         return `<div class="item"><div class="title-line"><div><strong>${esc(c.title)}</strong><div class="meta"><span style="color:${c.assignee==="anyone"?"inherit":memberColor(c.assignee)}">${(c.rotation||[]).length>1?"🔄 بالدور: "+c.rotation.map(id=>esc(memberName(id))).join(" ← "):c.assignee==="anyone"?"أي أحد":esc(memberName(c.assignee))}</span> · ${c.freq==="daily"||c.freq==="weekly"?"كل يوم":c.freq==="days"?(c.days||[]).map(d=>DOW_S[d]).join(" "):c.freq==="anytime"?"عند الحاجة":"مرة وحدة"}</div></div><button class="iconbtn" data-del-chore="${c.id}">✕</button></div>
-          <div style="margin-top:10px;">${dt?`<span class="done-badge">✓ ${esc(memberName(dt.by))} اليوم</span>`:isDueToday(c)?`<button class="btn small" data-toggle-chore="${c.id}">سويتها اليوم ✅</button>`:`<span class="meta">مو مطلوبة اليوم</span>`}</div></div>`; }).join("")}
+          <div style="margin-top:10px;">${dt?`<span class="done-badge">✓ ${esc(memberName(dt.by))} اليوم</span>`:isDueToday(c)?`<button class="btn small" data-toggle-chore="${c.id}">سويتها اليوم ✅</button>`:`<span class="meta">مو مطلوبة اليوم</span>`}
+            ${(nudgeable(c)&&c.assignee!==meId&&c.assignee!=="anyone"&&missedRecord(c).missed>=NUDGE_MIN_MISSES)?`<div class="meta" style="margin-top:8px;color:var(--amber)">${esc(choreFactsLine(c))}</div><button class="btn small secondary" data-chore-case="${c.id}" style="margin-top:6px;">🕊️ تكلم عنها بهدوء</button>`:""}</div></div>`; }).join("")}
     </div>`;
+}
+// What each person did and didn't do on one day. Grouped per person rather than
+// one flat list: on a shared calendar the useful question is "who did what", and
+// a flat list makes you re-read every row to work that out.
+function dayDetailHTML(ds){
+  const t=todayStr(), past=ds<=t;
+  const doneBy=(id)=>state.chores.filter(c=>c.log&&c.log[ds]&&c.log[ds].by===id);
+  const missedBy=(id)=>past?state.chores.filter(c=>c.assignee===id&&isDueToday(c,ds)&&!(c.log&&c.log[ds])):[];
+  const openAnyone=past?state.chores.filter(c=>c.assignee==="anyone"&&isDueToday(c,ds)&&!(c.log&&c.log[ds])):[];
+  const doneBtn=(c)=>isMine(c)?` <button class="btn small secondary" data-toggle-chore="${c.id}" data-date="${ds}" style="padding:4px 10px;min-height:30px;">سويتها</button>`:"";
+  const blocks=state.settings.members.map(m=>{
+    const done=doneBy(m.id), missed=missedBy(m.id);
+    if(!done.length&&!missed.length) return "";
+    return `<div class="item"><strong style="color:${memberColor(m.id)}">${esc(m.name)}</strong>
+      ${done.map(c=>`<div class="meta">✓ ${esc(c.title)}</div>`).join("")}
+      ${missed.map(c=>`<div class="meta" style="color:var(--amber)">○ ${esc(c.title)}${doneBtn(c)}</div>`).join("")}
+      <div class="meta" style="opacity:.7;">${ar(done.length)} منجزة${missed.length?` · ${ar(missed.length)} ما انسوت`:""}</div></div>`;
+  }).filter(Boolean).join("");
+  const anyoneBlock=openAnyone.length?`<div class="item"><strong>أي أحد</strong>
+    ${openAnyone.map(c=>`<div class="meta" style="color:var(--amber)">○ ${esc(c.title)}${doneBtn(c)}</div>`).join("")}</div>`:"";
+  return `<div id="dayDetail" style="margin-top:12px;scroll-margin-top:12px;"><strong>${new Date(ds+"T12:00:00").toLocaleDateString("ar-u-nu-arab",{weekday:"long",day:"numeric",month:"long"})}</strong>
+    ${blocks}${anyoneBlock}
+    ${!blocks&&!anyoneBlock?`<div class="meta" style="margin-top:8px;">${past?"ما فيه شي مسجل بهذا اليوم":"يوم جاي — ما فيه شي بعد"}</div>`:""}</div>`;
 }
 function renderCalendar(){
   const {y,m}=calMonth; const first=new Date(y,m,1); const t=todayStr();
@@ -681,11 +748,7 @@ function renderCalendar(){
     const who=new Set(); state.chores.forEach(c=>{ if(c.log&&c.log[ds]) who.add(c.log[ds].by); });
     cells+=`<div class="d ${ds===t?"today":""} ${ds===calSelected?"sel":""} ${ds>t?"other":""}" data-cal="${ds}">${ar(d)}<div class="dots">${[...who].map(w=>`<i style="background:${memberColor(w)}"></i>`).join("")}</div></div>`; }
   let detail="";
-  if(calSelected){ const ds=calSelected; const done=state.chores.filter(c=>c.log&&c.log[ds]); const due=state.chores.filter(c=>isDueToday(c,ds)&&!(c.log&&c.log[ds]));
-    detail=`<div style="margin-top:12px;"><strong>${new Date(ds+"T12:00:00").toLocaleDateString("ar-u-nu-arab",{weekday:"long",day:"numeric",month:"long"})}</strong>
-      ${done.map(c=>`<div class="meta">✓ ${esc(c.title)} — ${esc(memberName(c.log[ds].by))}</div>`).join("")}
-      ${ds<=t?due.map(c=>`<div class="meta" style="color:var(--amber)">○ ${esc(c.title)} — ${c.assignee==="anyone"?"أي أحد":esc(memberName(c.assignee))}${isMine(c)?` <button class="btn small secondary" data-toggle-chore="${c.id}" data-date="${ds}" style="padding:4px 10px;min-height:30px;">سويتها</button>`:""}</div>`).join(""):""}
-      ${!done.length&&!due.length?`<div class="meta">ما فيه شي</div>`:""}</div>`; }
+  if(calSelected) detail=dayDetailHTML(calSelected);
   return `<div class="row" style="justify-content:space-between;"><button class="iconbtn" data-cal-nav="1">‹</button><strong>📅 ${label}</strong><button class="iconbtn" data-cal-nav="-1">›</button></div><div class="cal" style="margin-top:8px;">${cells}</div>${detail}`;
 }
 
@@ -831,6 +894,7 @@ function openCaseModal(caseId){
       inner.innerHTML=`${roundsMapHTML(c)}<div class="stagepill">خطوة ١ — تعريف الشكوى${(c.round||1)>1?` — الجولة ${roundNum(c.round)}`:""}</div><label class="f">عن مين؟</label><select id="caseAbout">${state.settings.members.filter(m=>m.id!==meId).map(m=>`<option value="${m.id}" ${c.about===m.id?"selected":""}>${esc(m.name)}</option>`).join("")}</select>
         <label class="f">عنوان قصير</label><input type="text" id="caseTitle" value="${esc(c.title||"")}" placeholder="مثلاً: المهام البيتية">
         <label class="f">تصنيف (اختياري)</label><input type="text" id="caseTag" value="${esc(c.tag||"")}" placeholder="مثلاً: المطبخ، الوقت، الفلوس">
+        ${c.choreId&&state.chores.find(x=>x.id===c.choreId)?`<p class="footer-note" style="text-align:right;background:var(--chip);padding:8px 10px;border-radius:10px;">🧹 مرتبطة بمهمة: <strong>${esc(c.choreTitle||"")}</strong><br>${esc(choreFactsLine(state.chores.find(x=>x.id===c.choreId)))}</p>`:""}
         ${activeFrameworkSummary()?`<p class="footer-note" style="text-align:right;background:var(--chip);padding:8px 10px;border-radius:10px;">${activeFrameworkSummary()}</p>`:""}
         <div class="chatbox" id="caseChat">${threadHTML(c.threadA)}</div><textarea id="caseInput" placeholder="اكتب اللي بخاطرك — هذا خاص بك فقط."></textarea>
         <button class="btn small secondary" id="caseSend" style="margin-top:8px;">أرسل</button><button class="btn" id="caseFinish" style="margin-top:12px;">خلصت، جهز الملخص ➜</button>`;
@@ -842,7 +906,7 @@ function openCaseModal(caseId){
         saveCases(); chat.innerHTML=threadHTML(c.threadA); chat.scrollTop=chat.scrollHeight; };
       document.getElementById("caseFinish").onclick=async()=>{ c.about=document.getElementById("caseAbout").value; c.title=document.getElementById("caseTitle").value.trim()||"بدون عنوان"; c.tag=document.getElementById("caseTag").value.trim();
         const ut=c.threadA.filter(t=>t.role==="user").map(t=>t.content).join("\n"); toast("لحظة، نجهز الملخص…");
-        const res=await callAI(buildJudgmentContext()+`لخّص الموقف التالي بجملتين إلى ثلاث بصيغة محايدة تماماً (بدون اتهام). طبّق المبادئ أعلاه، وإذا استشهدت بآية أو حديث اذكر مرجعه بين قوسين داخل النص. ثم اقترح ٢-٣ حلول عملية. ثم اكتب خلاصة قصيرة جداً (٦ كلمات أو أقل) تصف موضوع هذه الجولة. رد بصيغة JSON فقط: {"summary":"...","suggestions":["...","..."],"takeaway":"..."}`, [{role:"user",content:ut||c.title}]);
+        const res=await callAI(buildJudgmentContext()+`لخّص الموقف التالي بجملتين إلى ثلاث بصيغة محايدة تماماً (بدون اتهام). طبّق المبادئ أعلاه، وإذا استشهدت بآية أو حديث اذكر مرجعه بين قوسين داخل النص. ثم اقترح ٢-٣ حلول عملية. ثم اكتب خلاصة قصيرة جداً (٦ كلمات أو أقل) تصف موضوع هذه الجولة. رد بصيغة JSON فقط: {"summary":"...","suggestions":["...","..."],"takeaway":"..."}`+choreFactsForCase(c), [{role:"user",content:ut||c.title}]);
         if(res.ok){ try{ const j=JSON.parse(res.text.match(/\{[\s\S]*\}/)[0]); c.neutralSummary=flagUnverifiedCitations(j.summary); c.suggestions=(j.suggestions||[]).map(flagUnverifiedCitations); c.takeaway=String(j.takeaway||"").trim().slice(0,60); }catch(e){ c.neutralSummary=res.text.slice(0,400); c.suggestions=[]; c.takeaway=res.text.trim().slice(0,40); } }
         else { toast("⚠️ "+res.reason); c.neutralSummary=ut.slice(0,300)||c.title; c.suggestions=["نجلس الثلاثة ونتكلم بهدوء، دقيقتين لكل شخص بدون مقاطعة."]; c.takeaway=(c.title||ut).slice(0,40); }
         if(!c.takeaway) c.takeaway=(c.title||"بدون خلاصة").slice(0,40);
@@ -901,6 +965,7 @@ function openReceivedCaseB(caseId){
     inner.innerHTML=`${roundsMapHTML(c)}<div class="stagepill">رسالة خاصة من ${esc(memberName(c.from))}${(c.round||1)>1?` — الجولة ${roundNum(c.round)}`:""}</div><h2>${esc(c.title)}</h2><h2 style="font-size:1rem;color:var(--ink-dim);margin-top:10px;">قال المساعد:</h2><div class="bubble ai">${esc(c.neutralSummary)}</div>
       ${c.noteFromSender?`<label class="f">ملاحظة من ${esc(memberName(c.from))}</label><p style="background:var(--chip);padding:10px 12px;border-radius:10px;">${esc(c.noteFromSender)}</p>`:""}
       ${c.suggestions.length?`<label class="f">اقتراحات</label><ul>${c.suggestions.map(s=>`<li>${esc(s)}</li>`).join("")}</ul>`:""}
+      ${c.choreId&&state.chores.find(x=>x.id===c.choreId)?`<p class="footer-note" style="text-align:right;background:var(--chip);padding:8px 10px;border-radius:10px;">🧹 مرتبطة بمهمة: <strong>${esc(c.choreTitle||"")}</strong><br>${esc(choreFactsLine(state.chores.find(x=>x.id===c.choreId)))}</p>`:""}
       <p class="sub">هذا خاص بينك وبين المساعد، لين تجهز ردك.</p>${activeFrameworkSummary()?`<p class="footer-note" style="text-align:right;background:var(--chip);padding:8px 10px;border-radius:10px;">${activeFrameworkSummary()}</p>`:""}
       <div class="chatbox" id="chatB">${threadHTML(c.threadB)}</div><textarea id="inputB" placeholder="شنو رأيك؟ اكتب بصراحة."></textarea><button class="btn small secondary" id="sendB" style="margin-top:8px;">أرسل</button><button class="btn" id="finishB" style="margin-top:12px;">جهز ردي النهائي ➜</button>`;
     const chat=document.getElementById("chatB"); chat.scrollTop=chat.scrollHeight;
@@ -910,7 +975,7 @@ function openReceivedCaseB(caseId){
       if(res.ok) c.threadB.push({role:"assistant",content:flagUnverifiedCitations(res.text)}); else { c.threadB.push({role:"error",content:"⚠️ المساعد ما رد: "+res.reason}); c.threadB.push({role:"assistant",content:scriptedPrompt(c.threadB.filter(t=>t.role==="user").length-1)}); }
       saveCases(); chat.innerHTML=threadHTML(c.threadB); chat.scrollTop=chat.scrollHeight; };
     document.getElementById("finishB").onclick=async()=>{ const ut=c.threadB.filter(t=>t.role==="user").map(t=>t.content).join("\n"); toast("لحظة…");
-      const res=await callAI(buildJudgmentContext()+`بناءً على الشكوى الأصلية ورد هذا الشخص، اكتب اقتراح حل نهائي عملي ومنصف بجملتين بصيغة "الاتفاق المقترح هو..." بدون لوم. إذا استشهدت بآية أو حديث اذكر مرجعه بين قوسين. ثم اكتب خلاصة قصيرة جداً (٦ كلمات أو أقل) لنتيجة هذه الجولة. رد بصيغة JSON فقط: {"resolution":"...","takeaway":"..."}`+fenced("الشكوى الأصلية",c.neutralSummary)+fenced("اقتراحات سابقة",c.suggestions.join("، ")), [{role:"user",content:ut||"بدون تفاصيل إضافية"}]);
+      const res=await callAI(buildJudgmentContext()+`بناءً على الشكوى الأصلية ورد هذا الشخص، اكتب اقتراح حل نهائي عملي ومنصف بجملتين بصيغة "الاتفاق المقترح هو..." بدون لوم. إذا استشهدت بآية أو حديث اذكر مرجعه بين قوسين. ثم اكتب خلاصة قصيرة جداً (٦ كلمات أو أقل) لنتيجة هذه الجولة. رد بصيغة JSON فقط: {"resolution":"...","takeaway":"..."}`+fenced("الشكوى الأصلية",c.neutralSummary)+fenced("اقتراحات سابقة",c.suggestions.join("، "))+choreFactsForCase(c), [{role:"user",content:ut||"بدون تفاصيل إضافية"}]);
       if(res.ok){ try{ const j=JSON.parse(res.text.match(/\{[\s\S]*\}/)[0]); c.proposedResolution=flagUnverifiedCitations(String(j.resolution||"").trim()); c.takeaway=String(j.takeaway||"").trim().slice(0,60); }
         catch(e){ c.proposedResolution=flagUnverifiedCitations(res.text.trim()); c.takeaway=res.text.trim().slice(0,40); } }
       else { toast("⚠️ "+res.reason); c.proposedResolution=""; c.takeaway=(ut||"بدون رد من المساعد").slice(0,40); }
@@ -937,11 +1002,100 @@ function openReceiveCodeModal(){
       // a later round of a case this phone already holds — refresh it in place instead of
       // pushing a second copy with the same id (threadB survives, same as the cloud path)
       if(c){ c.title=p.title; c.tag=p.tag||c.tag||""; c.neutralSummary=p.neutralSummary; c.suggestions=p.suggestions||[]; c.noteFromSender=p.noteFromSender||""; c.proposedResolution=""; c.noteFromResponder=""; c.takeaway=""; c.round=p.round||1; c.rounds=p.rounds||[]; c.openedAt=0; c.stage="received"; }
-      else cases.push({id:p.id,from:p.from,about:meId,title:p.title,tag:p.tag||"",stage:"received",threadA:[],neutralSummary:p.neutralSummary,suggestions:p.suggestions||[],threadB:[],proposedResolution:"",noteFromSender:p.noteFromSender||"",noteFromResponder:"",takeaway:"",sentAt:0,openedAt:0,round:p.round||1,rounds:p.rounds||[],createdAt:Date.now()});
+      else cases.push({id:p.id,from:p.from,about:meId,title:p.title,tag:p.tag||"",choreId:p.choreId||"",choreTitle:p.choreTitle||"",stage:"received",threadA:[],neutralSummary:p.neutralSummary,suggestions:p.suggestions||[],threadB:[],proposedResolution:"",noteFromSender:p.noteFromSender||"",noteFromResponder:"",takeaway:"",sentAt:0,openedAt:0,round:p.round||1,rounds:p.rounds||[],createdAt:Date.now()});
       saveCases(); openReceivedCaseB(p.id); }
-    else { let c=findCase(p.id); if(!c){ c={id:p.id,from:meId,about:p.from,title:p.title,tag:p.tag||"",stage:"awaiting_a",threadA:[],neutralSummary:p.neutralSummary,suggestions:p.suggestions||[],threadB:[],proposedResolution:p.proposedResolution,noteFromSender:"",noteFromResponder:p.noteFromResponder||"",takeaway:p.takeaway||"",sentAt:0,openedAt:0,round:p.round||1,rounds:p.rounds||[],createdAt:Date.now()}; cases.push(c); } else { c.proposedResolution=p.proposedResolution; c.noteFromResponder=p.noteFromResponder||""; c.takeaway=p.takeaway||c.takeaway||""; c.rounds=p.rounds||c.rounds||[]; c.stage="awaiting_a"; } saveCases(); openCaseModal(c.id); } };
+    else { let c=findCase(p.id); if(!c){ c={id:p.id,from:meId,about:p.from,title:p.title,tag:p.tag||"",choreId:p.choreId||"",choreTitle:p.choreTitle||"",stage:"awaiting_a",threadA:[],neutralSummary:p.neutralSummary,suggestions:p.suggestions||[],threadB:[],proposedResolution:p.proposedResolution,noteFromSender:"",noteFromResponder:p.noteFromResponder||"",takeaway:p.takeaway||"",sentAt:0,openedAt:0,round:p.round||1,rounds:p.rounds||[],createdAt:Date.now()}; cases.push(c); } else { c.proposedResolution=p.proposedResolution; c.noteFromResponder=p.noteFromResponder||""; c.takeaway=p.takeaway||c.takeaway||""; c.rounds=p.rounds||c.rounds||[]; c.stage="awaiting_a"; } saveCases(); openCaseModal(c.id); } };
 }
 
+
+// ============ CHORE ↔ COMPLAINT BRIDGE ============
+// A missed chore starts a PRIVATE conversation with the person themselves —
+// never a report to the family. The thread lives only in localStorage (hard
+// constraint 1) and nothing reaches anyone else unless they choose to send a
+// proposal, which then runs through the ordinary case flow where the other
+// person still has to agree. This is the "nothing decided about someone
+// without their agreement" rule applied to chores.
+function getTalk(id){ const t=loadJSON(LS_CHORETALKS,{}); return (t[id]&&t[id].thread)||[]; }
+function saveTalk(id,thread){ const t=loadJSON(LS_CHORETALKS,{}); t[id]={thread,updatedAt:Date.now()}; saveJSON(LS_CHORETALKS,t); }
+function clearTalk(id){ const t=loadJSON(LS_CHORETALKS,{}); delete t[id]; saveJSON(LS_CHORETALKS,t); }
+
+function openChoreTalkModal(choreId){
+  const ch=state.chores.find(c=>c.id===choreId); if(!ch) return;
+  let thread=getTalk(choreId);
+  const others=state.settings.members.filter(m=>m.id!==meId);
+  const modal=document.createElement("div"); modal.className="modal-bg";
+  modal.innerHTML=`<div class="card modal" id="talkInner"></div>`; document.body.appendChild(modal);
+  modal.onclick=(e)=>{ if(e.target===modal) modal.remove(); };
+  draw();
+  function draw(){
+    const inner=document.getElementById("talkInner");
+    inner.innerHTML=`<div class="stagepill">كلام خاص — ما أحد يشوفه غيرك</div>
+      <h2>${esc(ch.title)}</h2><p class="sub">${esc(choreFactsLine(ch))}</p>
+      ${activeFrameworkSummary()?`<p class="footer-note" style="text-align:right;background:var(--chip);padding:8px 10px;border-radius:10px;">${activeFrameworkSummary()}</p>`:""}
+      <div class="chatbox" id="talkChat">${threadHTML(thread)}</div>
+      <textarea id="talkInput" placeholder="وش اللي صعّب عليك المهمة؟ اكتب بصراحة — هذا خاص بك."></textarea>
+      <button class="btn small secondary" id="talkSend" style="margin-top:8px;">أرسل</button>
+      <label class="f">إذا حبيت تقترح تعديل، مين يشوفه؟</label>
+      <select id="talkAbout">${others.map(m=>`<option value="${m.id}">${esc(m.name)}</option>`).join("")}</select>
+      <button class="btn" id="talkPropose" style="margin-top:10px;">اقترح تعديل على العائلة ➜</button>
+      <button class="btn secondary" id="talkLater" style="margin-top:8px;">خلّها بيني وبين نفسي</button>`;
+    const chat=document.getElementById("talkChat"); chat.scrollTop=chat.scrollHeight;
+    if(!thread.length) askAI("");
+    document.getElementById("talkSend").onclick=()=>{ const v=document.getElementById("talkInput").value.trim(); if(!v) return;
+      document.getElementById("talkInput").value=""; askAI(v); };
+    document.getElementById("talkLater").onclick=()=>{ snoozeNudge(choreId); modal.remove(); render(); toast("تمام — ما راح نسألك عنها مرة ثانية قريب."); };
+    document.getElementById("talkPropose").onclick=propose;
+  }
+  async function askAI(userText){
+    const chat=document.getElementById("talkChat");
+    if(userText){ thread.push({role:"user",content:userText}); saveTalk(choreId,thread); }
+    chat.innerHTML=threadHTML(thread)+`<div class="bubble ai">…</div>`; chat.scrollTop=chat.scrollHeight;
+    const res=await callAI(buildJudgmentContext()+
+      `أنت مساعد هادئ داخل تطبيق عائلي. هذا الشخص ما قدر يلتزم بمهمة متكررة، ويتكلم معك بخصوصية تامة — ما أحد غيره يقرأ هذا الكلام. `+
+      `لا تلومه، ولا تفترض كسلاً أو إهمالاً، ولا تشخّص شخصيته. اسأله سؤالاً واحداً قصيراً عن الشي اللي صعّب عليه المهمة (وقت؟ صحة؟ المهمة نفسها مو مناسبة له؟ شي ثاني؟)، `+
+      `وبعد ما يشرح ساعده يختار مخرجاً عملياً: تغيير وقتها، أو تبديلها مع أحد، أو تصير "عند الحاجة"، أو يطلب مساعدة. أقل من ٧٠ كلمة، عربية بسيطة ودافئة.`+
+      fenced("وقائع المهمة المسجلة",choreFactsText(ch)),
+      thread.filter(t=>t.role!=="error").length?thread.filter(t=>t.role!=="error"):[{role:"user",content:"ما قدرت ألتزم بهذي المهمة."}]);
+    if(res.ok) thread.push({role:"assistant",content:flagUnverifiedCitations(res.text)});
+    else { thread.push({role:"error",content:"⚠️ المساعد ما رد: "+res.reason});
+           thread.push({role:"assistant",content:"وش الشي اللي صعّب عليك هذي المهمة؟ الوقت، أو المهمة نفسها، أو شي ثاني؟"}); }
+    saveTalk(choreId,thread); chat.innerHTML=threadHTML(thread); chat.scrollTop=chat.scrollHeight;
+  }
+  async function propose(){
+    const about=document.getElementById("talkAbout").value;
+    const ut=thread.filter(t=>t.role==="user").map(t=>t.content).join("\n");
+    if(!ut) return toast("تكلم شوي أول عشان نعرف نلخص وضعك.");
+    toast("لحظة، نجهز الاقتراح…");
+    const res=await callAI(buildJudgmentContext()+
+      `بناءً على حوار خاص مع شخص ما قدر يلتزم بمهمة بيتية، اكتب اقتراحاً للعائلة. `+
+      `الملخص محايد بجملتين، يشرح الوضع بدون لوم وبدون كشف تفاصيل خاصة زائدة، ويذكر الوقائع المسجلة. `+
+      `ثم ٢-٣ اقتراحات عملية لإعادة ترتيب المهمة. ثم خلاصة قصيرة جداً (٦ كلمات أو أقل). `+
+      `رد بصيغة JSON فقط: {"summary":"...","suggestions":["...","..."],"takeaway":"..."}`+
+      fenced("وقائع المهمة المسجلة",choreFactsText(ch)), [{role:"user",content:ut}]);
+    const c=newCase(about, `ترتيب مهمة: ${ch.title}`);
+    c.tag="مهام"; c.choreId=ch.id; c.choreTitle=ch.title;
+    c.threadA=thread.slice();                 // the private talk becomes this case's private thread — still local-only
+    if(res.ok){ try{ const j=JSON.parse(res.text.match(/\{[\s\S]*\}/)[0]);
+        c.neutralSummary=flagUnverifiedCitations(j.summary); c.suggestions=(j.suggestions||[]).map(flagUnverifiedCitations);
+        c.takeaway=String(j.takeaway||"").trim().slice(0,60); }
+      catch(e){ c.neutralSummary=res.text.slice(0,400); c.suggestions=[]; c.takeaway=ch.title.slice(0,40); } }
+    else { toast("⚠️ "+res.reason); c.neutralSummary=`ما قدرت ألتزم بمهمة "${ch.title}". ${choreFactsLine(ch)}`; c.suggestions=[]; c.takeaway=ch.title.slice(0,40); }
+    if(!c.takeaway) c.takeaway=ch.title.slice(0,40);
+    c.stage="ready_to_send"; saveCases(); clearTalk(choreId); snoozeNudge(choreId);
+    modal.remove(); render(); openCaseModal(c.id);
+  }
+}
+// The other direction: a family member raising a chore that keeps being missed.
+// Only offered when the log actually shows a pattern, so the case starts from a
+// dated record rather than from someone's memory of how often it happens.
+function startChoreCase(choreId){
+  const ch=state.chores.find(c=>c.id===choreId); if(!ch) return;
+  const about=(ch.assignee&&ch.assignee!=="anyone"&&ch.assignee!==meId)?ch.assignee:(state.settings.members.find(m=>m.id!==meId)||{}).id;
+  if(!about) return toast("ما فيه أحد ثاني بالعائلة.");
+  const c=newCase(about, `مهمة: ${ch.title}`);
+  c.tag="مهام"; c.choreId=ch.id; c.choreTitle=ch.title;
+  saveCases(); render(); openCaseModal(c.id);
+}
 
 // ================= RECEIPT SCANNING (vision, proxy only) =================
 // Shrink the photo before it leaves the phone: a raw camera JPEG is several MB,
@@ -1020,10 +1174,15 @@ function bindView(){
   document.querySelectorAll("[data-del-complaint]").forEach(b=>b.onclick=()=>deleteComplaint(b.dataset.delComplaint));
   document.querySelectorAll("[data-del-rule]").forEach(b=>b.onclick=()=>deleteAgreedRule(b.dataset.delRule));
   document.querySelectorAll("[data-del-case]").forEach(b=>b.onclick=()=>deleteCase(b.dataset.delCase));
+  document.querySelectorAll("[data-talk-chore]").forEach(b=>b.onclick=()=>openChoreTalkModal(b.dataset.talkChore));
+  document.querySelectorAll("[data-snooze-chore]").forEach(b=>b.onclick=()=>{ snoozeNudge(b.dataset.snoozeChore); render(); toast("تمام — ما راح نسألك عنها مرة ثانية قريب."); });
+  document.querySelectorAll("[data-chore-case]").forEach(b=>b.onclick=()=>startChoreCase(b.dataset.choreCase));
   document.querySelectorAll("[data-tag]").forEach(b=>b.onclick=()=>{ selectedTag=b.dataset.tag||null; render(); });
   document.querySelectorAll("[data-confirm-kudos]").forEach(b=>b.onclick=()=>toggleKudosConfirm(b.dataset.confirmKudos));
   document.querySelectorAll("[data-del-kudos]").forEach(b=>b.onclick=()=>deleteKudos(b.dataset.delKudos));
-  document.querySelectorAll("[data-cal]").forEach(d=>d.onclick=()=>{ calSelected=calSelected===d.dataset.cal?null:d.dataset.cal; render(); });
+  document.querySelectorAll("[data-cal]").forEach(d=>d.onclick=()=>{ calSelected=calSelected===d.dataset.cal?null:d.dataset.cal; render();
+    // the detail renders under the grid, off-screen on a phone — bring it to the eye
+    const det=document.getElementById("dayDetail"); if(det) det.scrollIntoView({behavior:"smooth",block:"center"}); });
   document.querySelectorAll("[data-cal-nav]").forEach(b=>b.onclick=()=>{ calMonth.m+=parseInt(b.dataset.calNav); if(calMonth.m<0){calMonth.m=11;calMonth.y--;} if(calMonth.m>11){calMonth.m=0;calMonth.y++;} calSelected=null; render(); });
   document.querySelectorAll("[data-open-case]").forEach(b=>b.onclick=()=>openCaseModal(b.dataset.openCase));
   document.querySelectorAll("[data-open-received]").forEach(b=>b.onclick=()=>openReceivedCaseB(b.dataset.openReceived));
