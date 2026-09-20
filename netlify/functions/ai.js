@@ -128,6 +128,11 @@ exports.handler = async (event) => {
         ignoredNotFree: [...new Set([...text.rejected, ...vision.rejected])],
         extraAllowed: EXTRA_ALLOWED_MODELS,
         providerOrder: PROVIDER_ORDER, providerStrict: PROVIDER_STRICT, temperature: TEMPERATURE,
+        // Whether these came from the env var or the built-in default. The default
+        // and a hand-set value can be identical, so listing the models alone can't
+        // tell you if your change reached the function — this can.
+        textModelsFromEnv: !!process.env.TEXT_MODELS,
+        visionModelsFromEnv: !!process.env.VISION_MODELS,
         keyInfo
       })
     };

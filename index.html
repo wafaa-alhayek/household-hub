@@ -1259,7 +1259,7 @@ function bindView(){
         // otherwise diagnosing a retired free model means reading Netlify's logs.
         let cfg="";
         try{ const h=await fetch("/.netlify/functions/ai?diag=1",{method:"GET"}); const j=await h.json();
-          if(j.textModels) cfg=`\n\nالنماذج المضبوطة الآن:\n${j.textModels.join("\n")||"(ما فيه)"}`+
+          if(j.textModels) cfg=`\n\nالنماذج المضبوطة الآن (${j.textModelsFromEnv?"من إعدادات Netlify":"الافتراضية — TEXT_MODELS ما وصلت"}):\n${j.textModels.join("\n")||"(ما فيه)"}`+
             (j.ignoredNotFree&&j.ignoredNotFree.length?`\n\n⚠️ انتُبذت لأنها مو مجانية:\n${j.ignoredNotFree.join("\n")}`:"");
           // Whether OpenRouter recognises the key Netlify is actually holding —
           // distinguishes a real rate limit from a key mix-up.
