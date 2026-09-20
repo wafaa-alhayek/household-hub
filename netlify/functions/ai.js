@@ -13,6 +13,15 @@
 // of ":free" options if these need swapping out.
 const FREE_MODELS = ["google/gemma-4-31b-it:free", "deepseek/deepseek-v4-flash-0731:free"];
 
+// Receipt scanning sends an image, which needs a multimodal model — most of the
+// text-only free models reject an image payload outright. This list is
+// overridable at runtime via the optional VISION_MODELS env var (comma-separated
+// ":free" model ids) so a model swap costs zero Netlify deploy credits: set it in
+// Site configuration -> Environment variables and the next function invocation
+// picks it up. Leave it unset to use the default below.
+const FREE_VISION_MODELS = (process.env.VISION_MODELS || "google/gemma-4-31b-it:free")
+  .split(",").map(m => m.trim()).filter(Boolean);
+
 async function tryModel(model, key, orMessages, max_tokens) {
   const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
@@ -33,10 +42,10 @@ exports.handler = async (event) => {
   if (event.httpMethod !== "POST") return { statusCode: 405, body: "Method not allowed" };
   if (!key) return { statusCode: 503, body: JSON.stringify({ error: { message: "AI_API_KEY not set on server" } }) };
   try {
-    const { system, messages, max_tokens } = JSON.parse(event.body || "{}");
+    const { system, messages, max_tokens, vision } = JSON.parse(event.body || "{}");
     const orMessages = system ? [{ role: "system", content: system }, ...(messages || [])] : (messages || []);
     let last;
-    for (const model of FREE_MODELS) {
+    for (const model of (vision ? FREE_VISION_MODELS : FREE_MODELS)) {
       last = await tryModel(model, key, orMessages, max_tokens || 600);
       if (last.ok) return { statusCode: 200, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: [{ type: "text", text: last.text }] }) };
     }
