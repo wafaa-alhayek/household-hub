@@ -32,6 +32,19 @@ function upstreamMessage(text) {
   }
 }
 
+// A free-tier 429 is usually a momentary burst limit rather than the daily cap,
+// so one short retry recovers it. Retrying more would just burn the same quota.
+const RETRY_STATUSES = [429, 502, 503, 529];
+async function tryModelWithRetry(model, key, orMessages, max_tokens) {
+  let r = await tryModel(model, key, orMessages, max_tokens);
+  if (!r.ok && RETRY_STATUSES.includes(r.status)) {
+    await new Promise(res => setTimeout(res, 1200));
+    const again = await tryModel(model, key, orMessages, max_tokens);
+    if (again.ok) return again;
+    return { ...again, retried: true };
+  }
+  return r;
+}
 async function tryModel(model, key, orMessages, max_tokens) {
   const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
@@ -78,21 +91,28 @@ exports.handler = async (event) => {
     const orMessages = system ? [{ role: "system", content: system }, ...(messages || [])] : (messages || []);
     const attempts = [];
     for (const model of picked.use) {
-      const r = await tryModel(model, key, orMessages, max_tokens || 600);
+      const r = await tryModelWithRetry(model, key, orMessages, max_tokens || 600);
       if (r.ok) return { statusCode: 200, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: [{ type: "text", text: r.text }] }) };
-      attempts.push({ model, status: r.status, message: upstreamMessage(r.text) });
+      attempts.push({ model, status: r.status, message: upstreamMessage(r.text), retried: !!r.retried });
     }
 
     // Report EVERY model that was tried. Returning only the last one's error hid
     // why the earlier models failed, which made a dead free tier look like a
     // problem with whichever model happened to be last in the list.
-    const detail = attempts.map(a => `${a.model} → ${a.status}: ${a.message}`).join(" | ");
+    const detail = attempts.map(a => `${a.model} → ${a.status}: ${a.message}${a.retried ? " (retried once)" : ""}`).join(" | ");
     const allGone = attempts.every(a => a.status === 404 || /unavailable for free|no longer|not found/i.test(a.message));
+    // Rate-limited is a very different problem from retired, and conflating the two
+    // sends you hunting for a replacement model when the model is fine.
+    const rateLimited = attempts.some(a => a.status === 429);
     return {
       statusCode: attempts[attempts.length - 1].status || 502,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ error: { message: detail + (allGone
         ? ` || FIX: every configured free model is gone. Set TEXT_MODELS in Netlify -> Environment variables to a ":free" slug from https://openrouter.ai/models?max_price=0 (no redeploy needed). Do NOT use the paid slug OpenRouter suggests — it bills the account.`
+        : rateLimited
+        ? ` || RATE LIMITED, not retired — the model is fine, the free quota is spent. ${picked.use.length === 1
+            ? `Only one model is configured, so there was nothing to fall back to: add more ":free" slugs to ${wantsVision ? "VISION_MODELS" : "TEXT_MODELS"} (comma-separated, different providers) so one provider's limit doesn't stop the app.`
+            : `All ${picked.use.length} configured models are limited right now.`} OpenRouter also raises the free-tier daily cap once the account holds credit — check the limits on your key's page.`
         : "") } })
     };
   } catch (e) {
