@@ -1258,9 +1258,17 @@ function bindView(){
         // On failure, show which models the server is actually configured with —
         // otherwise diagnosing a retired free model means reading Netlify's logs.
         let cfg="";
-        try{ const h=await fetch("/.netlify/functions/ai",{method:"GET"}); const j=await h.json();
+        try{ const h=await fetch("/.netlify/functions/ai?diag=1",{method:"GET"}); const j=await h.json();
           if(j.textModels) cfg=`\n\nالنماذج المضبوطة الآن:\n${j.textModels.join("\n")||"(ما فيه)"}`+
             (j.ignoredNotFree&&j.ignoredNotFree.length?`\n\n⚠️ انتُبذت لأنها مو مجانية:\n${j.ignoredNotFree.join("\n")}`:"");
+          // Whether OpenRouter recognises the key Netlify is actually holding —
+          // distinguishes a real rate limit from a key mix-up.
+          if(j.keyInfo) cfg+=j.keyInfo.error
+            ? `\n\n⚠️ المفتاح: ${j.keyInfo.error}`
+            : `\n\nالمفتاح شغّال ✅`+
+              (j.keyInfo.rateLimit?`\nالحد: ${JSON.stringify(j.keyInfo.rateLimit)}`:"")+
+              (j.keyInfo.isFreeTier!==undefined?`\nحساب مجاني: ${j.keyInfo.isFreeTier?"نعم":"لا (فيه رصيد)"}`:"")+
+              (j.keyInfo.limitRemaining!=null?`\nالمتبقي: ${j.keyInfo.limitRemaining}`:"");
         }catch(e){}
         $("testAiOut").innerHTML=`<span class="badge-err">❌ ${esc(r.reason)}</span>${esc(cfg)}`; };
       const sk=$("saveKeyBtn"); if(sk) sk.onclick=()=>{ const v=$("apiKeyInput").value.trim(); if(!v) return toast("الصق المفتاح أول."); const share=$("shareKeyCheck")?$("shareKeyCheck").checked:false; if(share&&cloud){ state.settings.aiKey=v; pushSettings(); lsSet(LS_KEY,""); toast("انحفظ ومُشارك مع العائلة."); } else { lsSet(LS_KEY,v); toast("انحفظ على هذا الجوال."); } render(); };

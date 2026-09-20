@@ -97,6 +97,25 @@ exports.handler = async (event) => {
   const vision = modelList(process.env.VISION_MODELS, DEFAULT_VISION_MODELS);
 
   if (event.httpMethod === "GET") {
+    // ?diag=1 additionally asks OpenRouter what it thinks of the key actually in
+    // use here — the only way to tell "this key is live and rate-limited" apart
+    // from "Netlify is holding a different key than the one you are looking at".
+    // Deliberately opt-in: detectProxy() calls this endpoint on every page load,
+    // and it must not make an upstream request each time. No key material is
+    // returned, only usage and limits.
+    let keyInfo;
+    if (key && /(^|[?&])diag=1(&|$)/.test(event.rawQuery || (event.queryStringParameters && event.queryStringParameters.diag === "1" ? "diag=1" : ""))) {
+      try {
+        const kr = await fetch("https://openrouter.ai/api/v1/auth/key", { headers: { "Authorization": `Bearer ${key}` } });
+        if (kr.ok) {
+          const d = (await kr.json()).data || {};
+          keyInfo = { usage: d.usage, limit: d.limit, limitRemaining: d.limit_remaining,
+                      isFreeTier: d.is_free_tier, rateLimit: d.rate_limit };
+        } else {
+          keyInfo = { error: `${kr.status}: ${upstreamMessage(await kr.text())}` };
+        }
+      } catch (e) { keyInfo = { error: String(e) }; }
+    }
     // Reports the live configuration so a failure can be diagnosed from the app
     // itself, without a redeploy or a look at the Netlify logs.
     return {
@@ -108,7 +127,8 @@ exports.handler = async (event) => {
         textModels: text.use, visionModels: vision.use,
         ignoredNotFree: [...new Set([...text.rejected, ...vision.rejected])],
         extraAllowed: EXTRA_ALLOWED_MODELS,
-        providerOrder: PROVIDER_ORDER, providerStrict: PROVIDER_STRICT, temperature: TEMPERATURE
+        providerOrder: PROVIDER_ORDER, providerStrict: PROVIDER_STRICT, temperature: TEMPERATURE,
+        keyInfo
       })
     };
   }
