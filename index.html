@@ -243,7 +243,13 @@ async function callAI(systemPrompt, turns){
     }
     if(!res.ok){
       let detail=""; try{ const j=await res.json(); detail=(j.error&&j.error.message)||JSON.stringify(j); }catch(e){ detail=await res.text().catch(()=> ""); }
-      const hint = res.status===401 ? "المفتاح غير صحيح." : res.status===400 && /credit|balance/i.test(detail) ? "الحساب ما فيه رصيد — لازم تشحن رصيد في console.anthropic.com ← Billing." : res.status===429 ? "تجاوزنا الحد المسموح مؤقتاً، جرّب بعد دقيقة." : "";
+      // A free model slug can be retired without warning; say so plainly instead of
+      // leaving a bare 404, and never repeat the paid slug the upstream suggests.
+      const modelGone = res.status===404 || /unavailable for free/i.test(detail);
+      const hint = modelGone ? "النموذج المجاني ما عاد متاح. لازم يتبدّل من إعدادات الخادم (TEXT_MODELS) — ما يحتاج نشر جديد."
+        : res.status===401 ? "المفتاح غير صحيح."
+        : res.status===400 && /credit|balance/i.test(detail) ? "الحساب ما فيه رصيد — لازم تشحن رصيد في console.anthropic.com ← Billing."
+        : res.status===429 ? "تجاوزنا الحد المسموح مؤقتاً، جرّب بعد دقيقة." : "";
       return {ok:false, reason:`${hint} (${res.status}) ${detail}`.trim()};
     }
     const data=await res.json();
@@ -1241,7 +1247,17 @@ function bindView(){
       const dn=$("disableNotifyBtn"); if(dn) dn.onclick=async()=>{ await unsubscribeFromPush(); render(); };
     }
     if(settingsView==="ai"){
-      $("testAiBtn").onclick=async()=>{ $("testAiOut").textContent="جاري الاختبار…"; const r=await callAI("رد بكلمة واحدة فقط: جاهز", [{role:"user",content:"اختبار"}]); $("testAiOut").innerHTML=r.ok?`<span class="badge-ok">✅ المساعد يشتغل — رد: ${esc(r.text)}</span>`:`<span class="badge-err">❌ ${esc(r.reason)}</span>`; };
+      $("testAiBtn").onclick=async()=>{ $("testAiOut").textContent="جاري الاختبار…";
+        const r=await callAI("رد بكلمة واحدة فقط: جاهز", [{role:"user",content:"اختبار"}]);
+        if(r.ok){ $("testAiOut").innerHTML=`<span class="badge-ok">✅ المساعد يشتغل — رد: ${esc(r.text)}</span>`; return; }
+        // On failure, show which models the server is actually configured with —
+        // otherwise diagnosing a retired free model means reading Netlify's logs.
+        let cfg="";
+        try{ const h=await fetch("/.netlify/functions/ai",{method:"GET"}); const j=await h.json();
+          if(j.textModels) cfg=`\n\nالنماذج المضبوطة الآن:\n${j.textModels.join("\n")||"(ما فيه)"}`+
+            (j.ignoredNotFree&&j.ignoredNotFree.length?`\n\n⚠️ انتُبذت لأنها مو مجانية:\n${j.ignoredNotFree.join("\n")}`:"");
+        }catch(e){}
+        $("testAiOut").innerHTML=`<span class="badge-err">❌ ${esc(r.reason)}</span>${esc(cfg)}`; };
       const sk=$("saveKeyBtn"); if(sk) sk.onclick=()=>{ const v=$("apiKeyInput").value.trim(); if(!v) return toast("الصق المفتاح أول."); const share=$("shareKeyCheck")?$("shareKeyCheck").checked:false; if(share&&cloud){ state.settings.aiKey=v; pushSettings(); lsSet(LS_KEY,""); toast("انحفظ ومُشارك مع العائلة."); } else { lsSet(LS_KEY,v); toast("انحفظ على هذا الجوال."); } render(); };
       const ck=$("clearKeyBtn"); if(ck) ck.onclick=()=>{ lsSet(LS_KEY,""); if(cloud){ state.settings.aiKey=""; pushSettings(); } toast("انحذف."); render(); };
     }

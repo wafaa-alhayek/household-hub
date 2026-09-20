@@ -1,26 +1,36 @@
 // Proxies chat requests to free models on OpenRouter (openrouter.ai), using the
 // existing AI_API_KEY environment variable already set in Netlify (Site
-// configuration -> Environment variables). No cost: both models below have the
-// ":free" suffix, which OpenRouter serves at no charge.
+// configuration -> Environment variables).
 //
-// Free models share a rate-limited pool per upstream provider, so FREE_MODELS
-// tries each in order and falls through to the next on a rate-limit/error —
-// they're on different upstream providers so they don't get limited together.
-// The frontend (index.html -> callAI) sends/expects Anthropic-shaped JSON
-// ({model, max_tokens, system, messages} in / {content:[{type:"text",text}]}
-// out) so this function translates to/from OpenRouter's OpenAI-compatible
-// format. See https://openrouter.ai/models?max_price=0 for the current list
-// of ":free" options if these need swapping out.
-const FREE_MODELS = ["google/gemma-4-31b-it:free", "deepseek/deepseek-v4-flash-0731:free"];
+// Free model slugs come and go — OpenRouter retires a ":free" tier with no
+// warning and answers 404 with "the paid version is available now, use this
+// slug instead". So both lists below are overridable at runtime via env vars,
+// and swapping a dead model costs ZERO deploy credits: set TEXT_MODELS (or
+// VISION_MODELS) in Netlify -> Environment variables to a comma-separated list
+// from https://openrouter.ai/models?max_price=0 and the next invocation picks
+// it up. Leave them unset to use the defaults here.
+//
+// Only ":free" slugs are ever called. OpenRouter's own 404 message points at
+// the PAID slug of the retired model, so following that hint — by hand or by
+// pasting it into the env var — would start charging the account. Non-free
+// entries are dropped and the reason is reported, never silently used.
+const DEFAULT_TEXT_MODELS = "google/gemma-4-31b-it:free";
+const DEFAULT_VISION_MODELS = "google/gemma-4-31b-it:free";
 
-// Receipt scanning sends an image, which needs a multimodal model — most of the
-// text-only free models reject an image payload outright. This list is
-// overridable at runtime via the optional VISION_MODELS env var (comma-separated
-// ":free" model ids) so a model swap costs zero Netlify deploy credits: set it in
-// Site configuration -> Environment variables and the next function invocation
-// picks it up. Leave it unset to use the default below.
-const FREE_VISION_MODELS = (process.env.VISION_MODELS || "google/gemma-4-31b-it:free")
-  .split(",").map(m => m.trim()).filter(Boolean);
+function modelList(envValue, fallback) {
+  const raw = (envValue || fallback).split(",").map(m => m.trim()).filter(Boolean);
+  return { use: raw.filter(m => m.endsWith(":free")), rejected: raw.filter(m => !m.endsWith(":free")) };
+}
+
+// Pull a human-readable reason out of whatever the upstream returned.
+function upstreamMessage(text) {
+  try {
+    const j = JSON.parse(text);
+    return (j.error && (j.error.message || j.error.code)) || JSON.stringify(j).slice(0, 200);
+  } catch (e) {
+    return (text || "").slice(0, 200) || "no response body";
+  }
+}
 
 async function tryModel(model, key, orMessages, max_tokens) {
   const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -36,20 +46,55 @@ async function tryModel(model, key, orMessages, max_tokens) {
 
 exports.handler = async (event) => {
   const key = process.env.AI_API_KEY;
+  const text = modelList(process.env.TEXT_MODELS, DEFAULT_TEXT_MODELS);
+  const vision = modelList(process.env.VISION_MODELS, DEFAULT_VISION_MODELS);
+
   if (event.httpMethod === "GET") {
-    return { statusCode: key ? 200 : 503, body: key ? "ok" : "AI_API_KEY not set on server" };
+    // Reports the live configuration so a failure can be diagnosed from the app
+    // itself, without a redeploy or a look at the Netlify logs.
+    return {
+      statusCode: key ? 200 : 503,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ok: !!key,
+        error: key ? undefined : "AI_API_KEY not set on server",
+        textModels: text.use, visionModels: vision.use,
+        ignoredNotFree: [...new Set([...text.rejected, ...vision.rejected])]
+      })
+    };
   }
   if (event.httpMethod !== "POST") return { statusCode: 405, body: "Method not allowed" };
   if (!key) return { statusCode: 503, body: JSON.stringify({ error: { message: "AI_API_KEY not set on server" } }) };
+
   try {
-    const { system, messages, max_tokens, vision } = JSON.parse(event.body || "{}");
-    const orMessages = system ? [{ role: "system", content: system }, ...(messages || [])] : (messages || []);
-    let last;
-    for (const model of (vision ? FREE_VISION_MODELS : FREE_MODELS)) {
-      last = await tryModel(model, key, orMessages, max_tokens || 600);
-      if (last.ok) return { statusCode: 200, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: [{ type: "text", text: last.text }] }) };
+    const { system, messages, max_tokens, vision: wantsVision } = JSON.parse(event.body || "{}");
+    const picked = wantsVision ? vision : text;
+    if (!picked.use.length) {
+      return { statusCode: 503, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ error: { message:
+        `No free model configured${picked.rejected.length ? ` — these were ignored for not ending in ":free": ${picked.rejected.join(", ")}` : ""}. `
+        + `Set ${wantsVision ? "VISION_MODELS" : "TEXT_MODELS"} in Netlify to a ":free" slug from https://openrouter.ai/models?max_price=0` } }) };
     }
-    return { statusCode: last.status, headers: { "Content-Type": "application/json" }, body: last.text };
+
+    const orMessages = system ? [{ role: "system", content: system }, ...(messages || [])] : (messages || []);
+    const attempts = [];
+    for (const model of picked.use) {
+      const r = await tryModel(model, key, orMessages, max_tokens || 600);
+      if (r.ok) return { statusCode: 200, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ content: [{ type: "text", text: r.text }] }) };
+      attempts.push({ model, status: r.status, message: upstreamMessage(r.text) });
+    }
+
+    // Report EVERY model that was tried. Returning only the last one's error hid
+    // why the earlier models failed, which made a dead free tier look like a
+    // problem with whichever model happened to be last in the list.
+    const detail = attempts.map(a => `${a.model} → ${a.status}: ${a.message}`).join(" | ");
+    const allGone = attempts.every(a => a.status === 404 || /unavailable for free|no longer|not found/i.test(a.message));
+    return {
+      statusCode: attempts[attempts.length - 1].status || 502,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ error: { message: detail + (allGone
+        ? ` || FIX: every configured free model is gone. Set TEXT_MODELS in Netlify -> Environment variables to a ":free" slug from https://openrouter.ai/models?max_price=0 (no redeploy needed). Do NOT use the paid slug OpenRouter suggests — it bills the account.`
+        : "") } })
+    };
   } catch (e) {
     return { statusCode: 502, body: JSON.stringify({ error: { message: String(e) } }) };
   }
