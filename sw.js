@@ -18,3 +18,24 @@ self.addEventListener("fetch", e => {
   }
   // Everything else (Firestore, Anthropic API): go to network, don't cache
 });
+
+// Push notifications (task reminders) — sent by netlify/functions/check-reminders.js
+self.addEventListener("push", e => {
+  let data = { title: "بيت العائلة", body: "عندك مهمة اليوم." };
+  try { if (e.data) data = Object.assign(data, e.data.json()); } catch (err) {}
+  e.waitUntil(self.registration.showNotification(data.title, {
+    body: data.body,
+    icon: "./icon-192.png",
+    badge: "./icon-192.png",
+    tag: data.tag || "hh-reminder",
+    data: { url: data.url || "./" }
+  }));
+});
+self.addEventListener("notificationclick", e => {
+  e.notification.close();
+  const url = (e.notification.data && e.notification.data.url) || "./";
+  e.waitUntil(clients.matchAll({ type: "window", includeUncontrolled: true }).then(list => {
+    for (const c of list) if ("focus" in c) return c.focus();
+    if (clients.openWindow) return clients.openWindow(url);
+  }));
+});

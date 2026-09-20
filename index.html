@@ -132,18 +132,25 @@ window.FIREBASE_CONFIG = {
 };
 </script>
 
+<!-- Vendored QR encoder (kazuhikoarase/qrcode-generator, MIT) — loaded as a plain static file, not a CDN,
+     so QR display still works fully offline like the rest of the app. -->
+<script src="./qrcode.min.js"></script>
+
 <script>
 (function(){
 "use strict";
 const FIREBASE_CONFIG = (window.FIREBASE_CONFIG && typeof window.FIREBASE_CONFIG==="object") ? window.FIREBASE_CONFIG : {};
 const FIREBASE_CONFIG_BROKEN = !window.FIREBASE_CONFIG;
 const FIREBASE_SDK_VERSION = "12.19.0";
+// Public VAPID key for Web Push — safe to be public (pairs with a private key kept only in Netlify env vars).
+const VAPID_PUBLIC_KEY = "BNHcQJh7XtObdVi9Dy3LczET1mZRwFPJ0Kn_TjPttoajiCtzy0-ZoSGiuJXvBcpdNTHriQbEEq7Uyo2Kg-clEQI";
 
 // ================= STORAGE =================
 const LS_STATE="hh_state_ar_v2", LS_ME="hh_me_ar_v1", LS_KEY="hh_api_key_v1", LS_CASES="hh_cases_v1",
       LS_PERSONA="hh_persona_v1", LS_BOOKRULES="hh_bookrules_v1", LS_BOOKMETA="hh_bookmeta_v1",
       LS_FAMILY="hh_family_code_v1", LS_USE_QURAN_FW="hh_use_quranfw_v1";
 const MEMBER_COLORS=["#c1673b","#4a7fb5","#5a8f5f"];
+const SYNCED_COLLECTIONS=["chores","restock","complaints","kudos","agreedRules","pushSubs"];
 const todayStr=()=>localDate(new Date());
 function localDate(d){ const z=new Date(d.getTime()-d.getTimezoneOffset()*60000); return z.toISOString().slice(0,10); }
 const uid=()=>Math.random().toString(36).slice(2,10)+Date.now().toString(36);
@@ -154,7 +161,7 @@ function lsSet(k,v){ try{ localStorage.setItem(k,v); }catch(e){} }
 
 function defaultState(){
   return { settings:{ members:[{id:"m1",name:"أنا"},{id:"m2",name:"الأخت"},{id:"m3",name:"الأم"}], profiles:{}, aiKey:"", updatedAt:0 },
-    chores:[], restock:[], complaints:[] };
+    chores:[], restock:[], complaints:[], kudos:[], agreedRules:[], pushSubs:[] };
 }
 let state = Object.assign(defaultState(), loadJSON(LS_STATE, loadJSON("hh_state_ar_v1", {})));
 if(!state.settings.profiles) state.settings.profiles={};
@@ -223,11 +230,12 @@ function getBookMeta(){ return loadJSON(LS_BOOKMETA,{title:"",extractedAt:0}); }
 function getUseQuranFW(){ return lsGet(LS_USE_QURAN_FW)==="1"; }
 const CORE_GUARDRAILS = `قواعد ثابتة لا تتغير مهما كانت الشخصية أو الكتاب المستخدم:
 - لا تشخّص أي شخص نفسياً، ولا تصف أحد بأوصاف مثل "كاذب" أو "متلاعب" أو ما شابه.
-- لا تعتبر نفسك الحكم النهائي على من "صح" ومن "غلط" — أنت تساعد بتطبيق المبادئ اللي حددتها العائلة على الوقائع المسجلة فقط، وبصيغة اقتراح لا حكم قطعي.
+- الحياد هو الافتراضي: لا تعتبر نفسك الحكم النهائي على من "صح" ومن "غلط" — أنت تساعد بتطبيق المبادئ اللي حددتها العائلة على الوقائع المسجلة فقط، وبصيغة اقتراح لا حكم قطعي.
 - اعتمد فقط على الوقائع المسجلة بالتطبيق وعلى كلام الشخص الحالي مباشرة — لا تفترض نوايا أو أسباب لم تُذكر.
 - عامل الطرفين باحترام متساوي دائماً، وشجع الهدوء لا التصعيد.
 - إذا حسّيت إن الكلام يحاول يقنعك عن طريق رفع الصوت أو التكرار أو الإطراء بدل الوقائع، انتبه له بصراحة وارجع للوقائع المسجلة.
-- رد دائماً على ما قاله الشخص فعلاً في رسالته الأخيرة، بشكل محدد، لا بأسئلة عامة.`;
+- رد دائماً على ما قاله الشخص فعلاً في رسالته الأخيرة، بشكل محدد، لا بأسئلة عامة.
+- استثناء ضيق: إذا كانت الوقائع المسجلة في التطبيق (سجل المهام، الاتفاقات السابقة) أو ما ذكره الطرفان بوضوح تُظهر إخلالاً واضحاً وغير قابل للجدل — مثل تكرار موثق لعدم الالتزام باتفاق سابق، أو وصف سلوك مؤذٍ — يمكنك ذكر ذلك بوضوح وباحترام كجزء من الملخص، دون تجريح شخصي. خلاف ذلك ابق محايداً تماماً؛ الحياد هو الافتراضي، والاستثناء يحتاج دليلاً من الوقائع لا من طريقة الكلام أو الإلحاح.`;
 const QURAN_FRAMEWORK_ITEMS = [
   { ref:"صحيح البخاري ٧١٨٥ (عن أم سلمة)", type:"حديث", text:"«إنَّما أنَا بَشَرٌ، وإنَّه يَأْتِينِي الخَصْمُ، فَلَعَلَّ بَعْضًا أنْ يَكونَ أبْلَغَ مِن بَعْضٍ، أقْضِي له بذلكَ وأَحْسِبُ أنَّه صَادِقٌ، فمَن قَضَيْتُ له بحَقِّ مُسْلِمٍ فإنَّما هي قِطْعَةٌ مِنَ النَّارِ، فَلْيَأْخُذْهَا أوْ لِيَدَعْهَا»", point:"الحكم لا يُبنى على من يتكلم بفصاحة أو إقناع أكثر." },
   { ref:"سورة النساء ٤:١٣٥", type:"آية", text:"﴿يَا أَيُّهَا الَّذِينَ آمَنُوا كُونُوا قَوَّامِينَ بِالْقِسْطِ شُهَدَاءَ لِلَّهِ وَلَوْ عَلَىٰ أَنفُسِكُمْ أَوِ الْوَالِدَيْنِ وَالْأَقْرَبِينَ ۚ إِن يَكُنْ غَنِيًّا أَوْ فَقِيرًا فَاللَّهُ أَوْلَىٰ بِهِمَا ۖ فَلَا تَتَّبِعُوا الْهَوَىٰ أَن تَعْدِلُوا﴾", point:"العدل واجب حتى لو كان ضد نفسك أو أقرب الناس إليك." },
@@ -268,6 +276,7 @@ function buildJudgmentContext(){
   if(getBookRules().trim()) ctx+=`\n\nقواعد من مرجع اعتمدته العائلة:\n${getBookRules().trim()}`;
   const profs=allProfilesText();
   if(profs) ctx+=`\n\nبطاقات أفراد العائلة (كل شخص كتبها عن نفسه — لا تستنتج صفة لم يكتبها):\n${profs}\n\nخاطب كل شخص بالطريقة التي طلبها، واقترح ما يهدّئه إذا احتدم النقاش. ممنوع استخدام خانة "ما يُثيرني" للضغط على أحد.`;
+  if(state.agreedRules.length) ctx+=`\n\nقواعد سبق أن اتفقت عليها العائلة (يراها الجميع، اعتبرها معياراً قائماً):\n${state.agreedRules.map(r=>`- ${r.text}`).join("\n")}`;
   const s30=computeStats(30);
   ctx+=`\n\nوقائع مسجلة (آخر ٣٠ يوم): `+state.settings.members.map(m=>`${m.name}: ${s30[m.id].done} مهمة منجزة، ${s30[m.id].complaints} شكوى`).join("؛ ");
   return ctx+"\n\n---\n\n";
@@ -303,10 +312,10 @@ async function initCloud(){
       push:(col,item)=>fsM.setDoc(fsM.doc(db,"families",fam,col,item.id),item).catch(e=>console.warn("push",e)),
       remove:(col,id)=>fsM.deleteDoc(fsM.doc(db,"families",fam,col,id)).catch(e=>console.warn("del",e)),
       pushSettings:()=>fsM.setDoc(settingsRef,{members:state.settings.members,profiles:state.settings.profiles||{},aiKey:state.settings.aiKey||"",updatedAt:Date.now()}).catch(e=>console.warn("settings",e)),
-      pushCase:(c)=>fsM.setDoc(fsM.doc(db,"families",fam,"cases",c.id),{id:c.id,from:c.from,about:c.about,title:c.title,stage:c.stage,neutralSummary:c.neutralSummary||"",suggestions:c.suggestions||[],proposedResolution:c.proposedResolution||"",updatedAt:Date.now()}).catch(e=>console.warn("case",e))
+      pushCase:(c)=>fsM.setDoc(fsM.doc(db,"families",fam,"cases",c.id),{id:c.id,from:c.from,about:c.about,title:c.title,stage:c.stage,neutralSummary:c.neutralSummary||"",suggestions:c.suggestions||[],proposedResolution:c.proposedResolution||"",noteFromSender:c.noteFromSender||"",noteFromResponder:c.noteFromResponder||"",updatedAt:Date.now()}).catch(e=>console.warn("case",e))
     };
     let seeded=lsGet("hh_cloud_seeded_"+fam)==="1";
-    if(!seeded){ for(const col of ["chores","restock","complaints"]) for(const it of state[col]) await cloud.push(col,it); await cloud.pushSettings(); lsSet("hh_cloud_seeded_"+fam,"1"); }
+    if(!seeded){ for(const col of SYNCED_COLLECTIONS) for(const it of state[col]) await cloud.push(col,it); await cloud.pushSettings(); lsSet("hh_cloud_seeded_"+fam,"1"); }
     fsM.onSnapshot(settingsRef, snap=>{
       if(!snap.exists()){ cloud.pushSettings(); return; }
       const d=snap.data();
@@ -315,15 +324,15 @@ async function initCloud(){
       if(typeof d.aiKey==="string") state.settings.aiKey=d.aiKey;
       saveState(); render();
     });
-    ["chores","restock","complaints"].forEach(col=>{
+    SYNCED_COLLECTIONS.forEach(col=>{
       fsM.onSnapshot(root(col), qs=>{ const remote=[]; qs.forEach(d=>remote.push(d.data())); const ids=new Set(remote.map(r=>r.id));
         state[col]=mergeArrayById(state[col].filter(x=>ids.has(x.id)),remote); saveState(); render(); });
     });
     fsM.onSnapshot(root("cases"), qs=>{
       let changed=false;
       qs.forEach(d=>{ const r=d.data(); let local=findCase(r.id);
-        if(r.about===meId && r.stage==="sent" && !local){ cases.push({id:r.id,from:r.from,about:meId,title:r.title,stage:"received",threadA:[],neutralSummary:r.neutralSummary,suggestions:r.suggestions||[],threadB:[],proposedResolution:"",createdAt:Date.now()}); changed=true; toast(`📩 وصلتك رسالة من ${memberName(r.from)}`); }
-        if(r.from===meId && r.stage==="b_ready" && local && local.stage!=="awaiting_a" && local.stage!=="closed"){ local.proposedResolution=r.proposedResolution; local.stage="awaiting_a"; changed=true; toast(`✅ رد ${memberName(r.about)} جاهز`); }
+        if(r.about===meId && r.stage==="sent" && !local){ cases.push({id:r.id,from:r.from,about:meId,title:r.title,stage:"received",threadA:[],neutralSummary:r.neutralSummary,suggestions:r.suggestions||[],threadB:[],proposedResolution:"",noteFromSender:r.noteFromSender||"",noteFromResponder:"",createdAt:Date.now()}); changed=true; toast(`📩 وصلتك رسالة من ${memberName(r.from)}`); }
+        if(r.from===meId && r.stage==="b_ready" && local && local.stage!=="awaiting_a" && local.stage!=="closed"){ local.proposedResolution=r.proposedResolution; local.noteFromResponder=r.noteFromResponder||""; local.stage="awaiting_a"; changed=true; toast(`✅ رد ${memberName(r.about)} جاهز`); }
         if(r.stage==="closed" && local && local.stage!=="closed"){ local.stage="closed"; changed=true; }
       });
       if(changed){ saveCases(); render(); }
@@ -338,6 +347,39 @@ function cloudBadge(){
   return `<span class="chip">📴 بدون سحابة</span>`;
 }
 function pushSettings(){ saveState(); if(cloud) cloud.pushSettings(); }
+
+// ================= PUSH NOTIFICATIONS =================
+function urlBase64ToUint8Array(base64String){
+  const padding="=".repeat((4-base64String.length%4)%4);
+  const base64=(base64String+padding).replace(/-/g,"+").replace(/_/g,"/");
+  const raw=atob(base64); const arr=new Uint8Array(raw.length);
+  for(let i=0;i<raw.length;i++) arr[i]=raw.charCodeAt(i);
+  return arr;
+}
+function myPushSub(){ return state.pushSubs.find(s=>s.memberId===meId); }
+async function subscribeToPush(){
+  try{
+    if(!("serviceWorker" in navigator)||!("PushManager" in window)) return {ok:false, reason:"المتصفح ما يدعم التنبيهات."};
+    if(!cloud) return {ok:false, reason:"لازم تربط الجوال بالعائلة أول (☁️ الربط بين الجوالات)."};
+    const perm=await Notification.requestPermission();
+    if(perm!=="granted") return {ok:false, reason:"ما وافقت على إذن التنبيهات."};
+    const reg=await navigator.serviceWorker.ready;
+    let sub=await reg.pushManager.getSubscription();
+    if(!sub) sub=await reg.pushManager.subscribe({userVisibleOnly:true, applicationServerKey:urlBase64ToUint8Array(VAPID_PUBLIC_KEY)});
+    const json=sub.toJSON();
+    state.pushSubs=state.pushSubs.filter(s=>!(s.memberId===meId));
+    const it=touch({id:uid(), memberId:meId, endpoint:json.endpoint, keys:json.keys, createdAt:Date.now()});
+    state.pushSubs.push(it); saveState(); cloud.push("pushSubs",it);
+    return {ok:true};
+  }catch(e){ return {ok:false, reason:(e&&e.message)||String(e)}; }
+}
+async function unsubscribeFromPush(){
+  try{ const reg=await navigator.serviceWorker.ready; const sub=await reg.pushManager.getSubscription(); if(sub) await sub.unsubscribe(); }catch(e){}
+  const mine=state.pushSubs.filter(s=>s.memberId===meId);
+  state.pushSubs=state.pushSubs.filter(s=>s.memberId!==meId); saveState();
+  if(cloud) mine.forEach(s=>cloud.remove("pushSubs",s.id));
+  toast("تم إيقاف التنبيهات.");
+}
 
 // ================= DOMAIN =================
 function isDueToday(c, dateStr){
@@ -361,12 +403,17 @@ function toggleRestock(id){ const r=state.restock.find(x=>x.id===id); if(!r) ret
 function deleteRestock(id){ state.restock=state.restock.filter(r=>r.id!==id); saveState(); if(cloud) cloud.remove("restock",id); render(); }
 function addPublicComplaint(from,about,title,resolution){ const it=touch({id:uid(),from,about,title,description:resolution,status:"resolved",createdAt:Date.now()}); state.complaints.push(it); saveState(); if(cloud) cloud.push("complaints",it); render(); }
 function deleteComplaint(id){ state.complaints=state.complaints.filter(c=>c.id!==id); saveState(); if(cloud) cloud.remove("complaints",id); render(); }
-function newCase(about,title){ const c={id:uid(),from:meId,about,title,stage:"draft_a",threadA:[],neutralSummary:"",suggestions:[],threadB:[],proposedResolution:"",createdAt:Date.now()}; cases.push(c); saveCases(); return c; }
+function addKudos(text){ const it=touch({id:uid(),memberId:meId,text,date:todayStr(),confirmedBy:{},createdAt:Date.now()}); state.kudos.push(it); saveState(); if(cloud) cloud.push("kudos",it); render(); }
+function toggleKudosConfirm(id){ const k=state.kudos.find(x=>x.id===id); if(!k||k.memberId===meId) return; k.confirmedBy=k.confirmedBy||{}; if(k.confirmedBy[meId]) delete k.confirmedBy[meId]; else k.confirmedBy[meId]=true; touch(k); saveState(); if(cloud) cloud.push("kudos",k); render(); }
+function deleteKudos(id){ state.kudos=state.kudos.filter(k=>k.id!==id); saveState(); if(cloud) cloud.remove("kudos",id); render(); }
+function addAgreedRule(text,sourceCaseId,sourceTitle){ const it=touch({id:uid(),text,sourceCaseId:sourceCaseId||"",sourceTitle:sourceTitle||"",createdAt:Date.now()}); state.agreedRules.push(it); saveState(); if(cloud) cloud.push("agreedRules",it); render(); }
+function deleteAgreedRule(id){ state.agreedRules=state.agreedRules.filter(r=>r.id!==id); saveState(); if(cloud) cloud.remove("agreedRules",id); render(); }
+function newCase(about,title){ const c={id:uid(),from:meId,about,title,stage:"draft_a",threadA:[],neutralSummary:"",suggestions:[],threadB:[],proposedResolution:"",noteFromSender:"",noteFromResponder:"",createdAt:Date.now()}; cases.push(c); saveCases(); return c; }
 function findCase(id){ return cases.find(c=>c.id===id); }
-function buildPackage(c,side){ return btoa(unescape(encodeURIComponent(JSON.stringify({id:c.id,title:c.title,from:c.from,about:c.about,neutralSummary:c.neutralSummary,suggestions:c.suggestions,proposedResolution:c.proposedResolution,side})))); }
+function buildPackage(c,side){ return btoa(unescape(encodeURIComponent(JSON.stringify({id:c.id,title:c.title,from:c.from,about:c.about,neutralSummary:c.neutralSummary,suggestions:c.suggestions,proposedResolution:c.proposedResolution,noteFromSender:c.noteFromSender,noteFromResponder:c.noteFromResponder,side})))); }
 function readPackage(code){ try{ return JSON.parse(decodeURIComponent(escape(atob(code.trim())))); }catch(e){ return null; } }
 function exportCode(){ return btoa(unescape(encodeURIComponent(JSON.stringify(state)))); }
-function importCode(code){ try{ const inc=JSON.parse(decodeURIComponent(escape(atob(code.trim())))); if(inc.settings) state.settings=Object.assign(state.settings,inc.settings); ["chores","restock","complaints"].forEach(k=>{ if(inc[k]) state[k]=mergeArrayById(state[k],inc[k]); }); saveState(); return true; }catch(e){ return false; } }
+function importCode(code){ try{ const inc=JSON.parse(decodeURIComponent(escape(atob(code.trim())))); if(inc.settings) state.settings=Object.assign(state.settings,inc.settings); ["chores","restock","complaints","kudos","agreedRules"].forEach(k=>{ if(inc[k]) state[k]=mergeArrayById(state[k],inc[k]); }); saveState(); return true; }catch(e){ return false; } }
 
 // ================= STATS / STREAKS =================
 function computeStats(days){
@@ -376,6 +423,7 @@ function computeStats(days){
   state.complaints.forEach(c=>{ if(c.createdAt>=cutoff && s[c.from]) s[c.from].complaints++; });
   return s;
 }
+function recentKudos(){ const cutoff=Date.now()-14*86400000; return state.kudos.filter(k=>(k.createdAt||0)>=cutoff).sort((a,b)=>(b.createdAt||0)-(a.createdAt||0)); }
 function dayCounts(memberId){ // {dateStr: count}
   const out={}; state.chores.forEach(c=>Object.entries(c.log||{}).forEach(([d,e])=>{ if(!memberId||e.by===memberId) out[d]=(out[d]||0)+1; })); return out;
 }
@@ -399,6 +447,16 @@ function heatmapSVG(memberId, weeks){
     svg+=`<rect x="${c*(cell+gap)}" y="${r*(cell+gap)}" width="${cell}" height="${cell}" rx="3" fill="var(--heat${lvl})"><title>${ds}: ${n}</title></rect>`;
   } }
   return svg+"</svg>";
+}
+
+function qrSVG(text){
+  try{
+    const qr=qrcode(0,"M"); qr.addData(text); qr.make();
+    const n=qr.getModuleCount(), cell=6;
+    let svg=`<svg viewBox="0 0 ${n*cell} ${n*cell}" style="width:100%;max-width:260px;display:block;margin:auto;background:#fff;border-radius:12px;">`;
+    for(let r=0;r<n;r++) for(let c=0;c<n;c++) if(qr.isDark(r,c)) svg+=`<rect x="${c*cell}" y="${r*cell}" width="${cell}" height="${cell}" fill="#000"/>`;
+    return svg+"</svg>";
+  }catch(e){ return `<p class="sub">ما قدرنا نجهز QR (الرمز طويل جداً؟)</p>`; }
 }
 
 // ================= RENDER =================
@@ -444,6 +502,15 @@ function renderToday(){
       ${pending.map(c=>`<div class="bigcheck" data-toggle-chore="${c.id}"><div class="box"></div><div><div class="t">${esc(c.title)}</div><div class="meta">${c.assignee==="anyone"?"أي أحد":""}</div></div></div>`).join("")}
       ${done.map(c=>`<div class="bigcheck done" data-toggle-chore="${c.id}"><div class="box">✓</div><div><div class="t">${esc(c.title)}</div></div></div>`).join("")}
       ${pending.length===0&&mine.length>0?`<p class="badge-ok" style="text-align:center;margin:10px 0 0;">خلصت كل شي اليوم 🏆</p>`:""}
+    </div>
+    <div class="card"><strong>🙏 سويت شي اليوم؟</strong>
+      <p class="sub" style="margin-top:4px;">اكتب أي شي سويته — حتى إذا مو مجدول. غيرك يقدر يأكّده.</p>
+      <textarea id="kudosInput" placeholder="مثلاً: رتبت المطبخ، وديت الجهاز للصيانة…" style="min-height:56px;"></textarea>
+      <button class="btn small" id="addKudosBtn" style="margin-top:8px;">إضافة</button>
+      ${recentKudos().map(k=>{ const confirmed=!!(k.confirmedBy||{})[meId]; const cnt=Object.keys(k.confirmedBy||{}).length;
+        return `<div class="item"><div class="title-line"><div><strong style="color:${memberColor(k.memberId)}">${esc(memberName(k.memberId))}</strong> <span class="meta">${new Date(k.createdAt).toLocaleDateString("ar")}</span><p style="margin:4px 0 0;">${esc(k.text)}</p></div>${k.memberId===meId?`<button class="iconbtn" data-del-kudos="${k.id}">✕</button>`:""}</div>
+          <div style="margin-top:8px;">${k.memberId!==meId?`<button class="btn small ${confirmed?"":"secondary"}" data-confirm-kudos="${k.id}">${confirmed?"✅ أكدتها":"أكّدها"}</button>`:""}${cnt?` <span class="meta">✅ أكدها ${cnt}</span>`:""}</div></div>`; }).join("")}
+      ${recentKudos().length===0?`<p class="sub" style="margin-top:10px;">لسا ما فيه شي مسجل.</p>`:""}
     </div>
     <div class="card"><strong>🔥 سلسلتي</strong>
       <div class="statgrid" style="margin-top:8px;"><div><div class="n">${st.current}</div><div class="l">أيام متتالية</div></div><div><div class="n">${st.longest}</div><div class="l">أطول سلسلة</div></div><div><div class="n">${st.total}</div><div class="l">مهمة منجزة</div></div></div>
@@ -519,6 +586,9 @@ function renderComplaints(){
       <button class="btn" id="startCaseBtn">ابدأ شكوى خاصة</button></div>
     ${my.length?`<div class="card"><strong>قضاياي</strong>${my.map(c=>`<div class="item"><div class="title-line"><div><strong>${esc(c.title||"(بدون عنوان)")}</strong><div class="meta">مع ${esc(memberName(c.about))} · ${stageLabel(c.stage)}</div></div><button class="btn small ${c.stage==="awaiting_a"?"":"secondary"}" data-open-case="${c.id}">فتح</button></div></div>`).join("")}</div>`:""}
     ${cloud?"":`<div class="card"><button class="btn secondary" id="receiveCaseBtn">📩 استلمت رمز من حد</button><p class="footer-note" style="margin-top:8px;">بدون سحابة، الرسائل تنتقل بالرموز.</p></div>`}
+    ${state.agreedRules.length?`<div class="card"><strong>📜 قواعد متفق عليها</strong>
+      ${state.agreedRules.slice().sort((a,b)=>(b.createdAt||0)-(a.createdAt||0)).map(r=>`<div class="item"><div class="title-line"><div><p style="margin:0;">${esc(r.text)}</p><div class="meta">${new Date(r.createdAt).toLocaleDateString("ar")}${r.sourceTitle?" · من: "+esc(r.sourceTitle):""}</div></div><button class="iconbtn" data-del-rule="${r.id}">✕</button></div></div>`).join("")}
+    </div>`:""}
     <div class="card"><strong>سجل الشكاوى المتفق عليها</strong>
       ${items.length===0?`<p class="sub">ما فيه شي بعد.</p>`:items.map(c=>`<div class="item"><div class="title-line"><div><strong>${esc(c.title)}</strong><div class="meta">${esc(memberName(c.from))} ↔ ${esc(memberName(c.about))} · ${new Date(c.createdAt).toLocaleDateString("ar")} · <span class="badge-ok">انحلت</span></div></div><button class="iconbtn" data-del-complaint="${c.id}">✕</button></div><p style="margin:8px 0;">${esc(c.description)}</p></div>`).join("")}</div>`;
 }
@@ -526,15 +596,15 @@ function renderComplaints(){
 // ---------- settings (menu + sub-screens) ----------
 const SETTINGS_MENU=[
   {k:"profile",ic:"🧾",t:"بطاقتي"},{k:"family",ic:"👨‍👩‍👧",t:"العائلة والأسماء"},{k:"stats",ic:"📊",t:"التقرير"},
-  {k:"cloud",ic:"☁️",t:"الربط بين الجوالات"},{k:"ai",ic:"🤖",t:"المساعد الذكي"},{k:"quran",ic:"🕌",t:"الإطار القرآني"},
+  {k:"cloud",ic:"☁️",t:"الربط بين الجوالات"},{k:"notify",ic:"🔔",t:"التنبيهات"},{k:"ai",ic:"🤖",t:"المساعد الذكي"},{k:"quran",ic:"🕌",t:"الإطار القرآني"},
   {k:"persona",ic:"🧭",t:"شخصية المساعد"},{k:"book",ic:"📖",t:"قواعد من كتاب"},{k:"sync",ic:"🔗",t:"مزامنة يدوية (احتياطي)"}
 ];
 function renderMore(){
-  if(!settingsView) return `${hdr("⚙️ المزيد")}<div class="card">${SETTINGS_MENU.filter(m=>m.k!=="sync"||!cloud).map(m=>`<div class="menu-item" data-set="${m.k}"><span>${m.ic} ${m.t}</span><span class="arrow">‹</span></div>`).join("")}</div>
+  if(!settingsView) return `${hdr("⚙️ المزيد")}<div class="card">${SETTINGS_MENU.filter(m=>(m.k!=="sync"||!cloud)&&(m.k!=="notify"||cloud)).map(m=>`<div class="menu-item" data-set="${m.k}"><span>${m.ic} ${m.t}</span><span class="arrow">‹</span></div>`).join("")}</div>
     <div class="card"><button class="btn secondary" id="switchUserBtn">تبديل المستخدم على هذا الجوال</button></div>
     <p class="footer-note">${cloudBadge()} · المساعد: ${{proxy:"عبر الخادم ✅",cloud:"مفتاح مشترك ✅",local:"مفتاح هذا الجوال",none:"غير مفعّل"}[aiSource()]}</p>`;
   const m=SETTINGS_MENU.find(x=>x.k===settingsView);
-  const fn={profile:sProfile,family:sFamily,stats:sStats,cloud:sCloud,ai:sAI,quran:sQuran,persona:sPersona,book:sBook,sync:sSync}[settingsView];
+  const fn={profile:sProfile,family:sFamily,stats:sStats,cloud:sCloud,notify:sNotify,ai:sAI,quran:sQuran,persona:sPersona,book:sBook,sync:sSync}[settingsView];
   return `<button class="back" data-set-back>‹ رجوع</button><h1>${m.ic} ${m.t}</h1>${fn()}`;
 }
 function sProfile(){ return `<div class="card"><p class="sub">اكتب عن نفسك: كيف تحب يُتكلم معك، مبادئك، ما يزعجك وما يهدّيك. المساعد يستخدمها ليخاطبك بطريقتك. يشوفها الجميع.</p>
@@ -543,9 +613,47 @@ function sProfile(){ return `<div class="card"><p class="sub">اكتب عن نف
 function sFamily(){ return `<div class="card"><strong>الأسماء</strong>${state.settings.members.map(m=>`<input type="text" class="renameInput" data-id="${m.id}" value="${esc(m.name)}" style="margin-top:8px;border-color:${memberColor(m.id)}">`).join("")}<button class="btn small secondary" id="saveNamesBtn" style="margin-top:8px;">حفظ</button></div>
   ${state.settings.members.filter(m=>m.id!==meId&&profileText(m.id)).map(m=>{ const p=getProfile(m.id); return `<div class="card"><strong style="color:${memberColor(m.id)}">${esc(m.name)}</strong>${PROFILE_FIELDS.filter(f=>(p[f.key]||"").trim()).map(f=>`<div class="meta" style="margin-top:4px;"><b>${esc(f.label)}:</b> ${esc(p[f.key])}</div>`).join("")}</div>`; }).join("")}`; }
 function sStats(){ const s=computeStats(30); return `<div class="card"><p class="sub">آخر ٣٠ يوم — أرقام فقط من السجل.</p>${state.settings.members.map(m=>{ const st=streakFor(m.id); return `<div class="item"><strong style="color:${memberColor(m.id)}">${esc(m.name)}</strong><div class="meta">أنجز ${s[m.id].done} مهمة · سلسلة حالية ${st.current} يوم · أطول سلسلة ${st.longest} · رفع ${s[m.id].complaints} شكوى</div><div style="margin-top:6px;">${heatmapSVG(m.id,12)}</div></div>`; }).join("")}</div>`; }
-function sCloud(){ return `<div class="card">${cloudBadge()}<p class="sub" style="margin-top:8px;">${cloudConfigured()?"اكتب رمز العائلة نفسه على كل جوال. بعدها كل شيء يتزامن تلقائياً، ويشتغل بدون إنترنت ويتحدّث لما يرجع.":(FIREBASE_CONFIG_BROKEN?"⚠️ إعدادات Firebase في الملف فيها خطأ إملائي.":"الملف ما فيه إعدادات Firebase.")}</p>
-  <input type="password" id="familyCodeInput" placeholder="رمز العائلة" value="${esc(getFamilyCode())}" ${cloudConfigured()?"":"disabled"}><button class="btn small" id="saveFamilyBtn" style="margin-top:8px;" ${cloudConfigured()?"":"disabled"}>حفظ والاتصال</button>
-  <p class="footer-note">من يعرف الرمز يقدر يقرأ ويكتب بيانات البيت — خلّوه طويل وسري.</p></div>`; }
+function sCloud(){
+  const hasCode=!!getFamilyCode(); const canScan=("BarcodeDetector" in window);
+  return `<div class="card">${cloudBadge()}<p class="sub" style="margin-top:8px;">${cloudConfigured()?"اربط جوالات العائلة كلها بنفس رمز العائلة — بعدها كل شيء يتزامن تلقائياً.":(FIREBASE_CONFIG_BROKEN?"⚠️ إعدادات Firebase في الملف فيها خطأ إملائي.":"الملف ما فيه إعدادات Firebase.")}</p>
+  ${!cloudConfigured()?"":hasCode?
+    `<button class="btn small secondary" id="showQrBtn" style="margin-top:8px;">📷 اعرض QR للعائلة</button><div id="qrBox" style="display:none;margin-top:12px;"></div>`
+    :canScan?
+    `<button class="btn" id="scanQrBtn">📷 امسح QR من جوال العائلة</button><div id="scanErrBox" class="meta" style="margin-top:8px;"></div>`
+    :`<p class="footer-note">جهازك ما يدعم مسح QR — استخدم الإدخال اليدوي تحت.</p>`}
+  <details style="margin-top:12px;" ${hasCode?"":"open"}><summary style="cursor:pointer;color:var(--accent);font-weight:600;">${hasCode?"غيّر الرمز يدوياً":"أو اكتب الرمز يدوياً"}</summary>
+    <div style="margin-top:10px;"><input type="password" id="familyCodeInput" placeholder="رمز العائلة" value="${esc(getFamilyCode())}" ${cloudConfigured()?"":"disabled"}><button class="btn small" id="saveFamilyBtn" style="margin-top:8px;" ${cloudConfigured()?"":"disabled"}>حفظ والاتصال</button></div>
+  </details>
+  <p class="footer-note">من يعرف الرمز يقدر يقرأ ويكتب بيانات البيت — خلّوه طويل وسري.</p></div>`;
+}
+function sNotify(){
+  const sub=myPushSub(); const supported=("serviceWorker" in navigator)&&("PushManager" in window)&&/^https?:/.test(location.protocol);
+  return `<div class="card"><p class="sub">فعّل التنبيهات عشان توصلك رسالة لما يكون عندك مهمة اليوم — حتى لو التطبيق مقفول.</p>
+    ${!supported?`<p class="badge-err">جهازك أو المتصفح ما يدعم التنبيهات.</p>`:sub?`<p class="badge-ok">✅ التنبيهات مفعّلة على هذا الجوال</p><button class="btn small secondary" id="disableNotifyBtn" style="margin-top:8px;">إيقاف</button>`:`<button class="btn" id="enableNotifyBtn">🔔 فعّل التنبيهات</button>`}
+    <p id="notifyMsg" class="meta" style="margin-top:8px;"></p></div>`;
+}
+function openQrScanModal(onResult){
+  const modal=document.createElement("div"); modal.className="modal-bg";
+  modal.innerHTML=`<div class="card modal"><h2>📷 وجّه الكاميرا لرمز QR</h2><video id="qrVideo" autoplay playsinline muted style="width:100%;border-radius:12px;background:#000;"></video><button class="btn secondary" id="qrCancel" style="margin-top:10px;">إلغاء</button></div>`;
+  document.body.appendChild(modal);
+  let stream=null, stopped=false;
+  const cleanup=()=>{ stopped=true; if(stream) stream.getTracks().forEach(t=>t.stop()); modal.remove(); };
+  document.getElementById("qrCancel").onclick=cleanup;
+  modal.onclick=(e)=>{ if(e.target===modal) cleanup(); };
+  (async()=>{
+    try{
+      stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment"}});
+      const video=document.getElementById("qrVideo"); video.srcObject=stream; await video.play();
+      const detector=new BarcodeDetector({formats:["qr_code"]});
+      const loop=async()=>{
+        if(stopped) return;
+        try{ const codes=await detector.detect(video); if(codes.length){ const val=codes[0].rawValue; cleanup(); onResult(val); return; } }catch(e){}
+        requestAnimationFrame(loop);
+      };
+      loop();
+    }catch(e){ cleanup(); onResult(null, e); }
+  })();
+}
 function sAI(){ const src=aiSource(); return `<div class="card">
   <p><b>الحالة:</b> ${{proxy:"<span class='badge-ok'>يشتغل عبر الخادم — ما يحتاج مفتاح على الجوالات ✅</span>",cloud:"<span class='badge-ok'>مفتاح مشترك عبر السحابة ✅</span>",local:"مفتاح محفوظ على هذا الجوال فقط",none:"<span class='badge-err'>غير مفعّل</span>"}[src]}</p>
   <button class="btn small secondary" id="testAiBtn">🧪 اختبار المساعد الآن</button><p id="testAiOut" class="meta" style="margin-top:8px;white-space:pre-wrap;"></p></div>
@@ -591,9 +699,11 @@ function openCaseModal(caseId){
         else { toast("⚠️ "+res.reason); c.neutralSummary=ut.slice(0,300)||c.title; c.suggestions=["نجلس الثلاثة ونتكلم بهدوء، دقيقتين لكل شخص بدون مقاطعة."]; }
         c.stage="ready_to_send"; saveCases(); draw(); };
     } else if(c.stage==="ready_to_send"){
-      inner.innerHTML=`<div class="stagepill">خطوة ٢ — راجع قبل الإرسال</div><h2>هذا الملخص</h2><textarea id="editSummary">${esc(c.neutralSummary)}</textarea><label class="f">اقتراحات للحل</label><ul>${c.suggestions.map(s=>`<li>${esc(s)}</li>`).join("")}</ul>
-        <p class="sub">هذا اللي بيوصل لـ <strong>${esc(memberName(c.about))}</strong> فقط — مو الكلام الخاص.</p><button class="btn" id="sendBtn">${cloud?"إرسال ➜":"جهز الرمز ➜"}</button><button class="btn secondary" id="backEdit" style="margin-top:8px;">رجوع للتعديل</button>`;
-      document.getElementById("sendBtn").onclick=()=>{ c.neutralSummary=document.getElementById("editSummary").value.trim(); c.stage="sent"; saveCases(); if(cloud){ cloud.pushCase(c); modal.remove(); render(); toast(`✅ أُرسلت لـ ${memberName(c.about)}`); } else draw(); };
+      inner.innerHTML=`<div class="stagepill">خطوة ٢ — راجع قبل الإرسال</div><h2>قال المساعد:</h2><div class="bubble ai">${esc(c.neutralSummary)}</div><label class="f">اقتراحات للحل</label><ul>${c.suggestions.map(s=>`<li>${esc(s)}</li>`).join("")}</ul>
+        <p class="sub">كلام المساعد ما يتغيّر — إذا فيه شي ناقص أو غير دقيق، أضفه كملاحظة منك وتوصل الاثنين مع بعض.</p>
+        <label class="f">ملاحظة منك (اختياري)</label><textarea id="senderNote" placeholder="مثلاً: توضيح، أو تصحيح لشي">${esc(c.noteFromSender||"")}</textarea>
+        <p class="sub">هذا اللي بيوصل لـ <strong>${esc(memberName(c.about))}</strong> فقط — مو الكلام الخاص.</p><button class="btn" id="sendBtn">${cloud?"إرسال ➜":"جهز الرمز ➜"}</button><button class="btn secondary" id="backEdit" style="margin-top:8px;">رجوع للمحادثة</button>`;
+      document.getElementById("sendBtn").onclick=()=>{ c.noteFromSender=document.getElementById("senderNote").value.trim(); c.stage="sent"; saveCases(); if(cloud){ cloud.pushCase(c); modal.remove(); render(); toast(`✅ أُرسلت لـ ${memberName(c.about)}`); } else draw(); };
       document.getElementById("backEdit").onclick=()=>{ c.stage="draft_a"; saveCases(); draw(); };
     } else if(c.stage==="sent"){
       if(cloud){ inner.innerHTML=`<h2>✅ أُرسلت لـ ${esc(memberName(c.about))}</h2><p class="sub">بيوصله تنبيه لما يفتح التطبيق، وبتشوف رده هنا.</p><button class="btn secondary" id="cl">إغلاق</button>`; document.getElementById("cl").onclick=()=>modal.remove(); return; }
@@ -601,9 +711,13 @@ function openCaseModal(caseId){
       inner.innerHTML=`<h2>أرسل هذا الرمز لـ ${esc(memberName(c.about))}</h2><textarea readonly style="font-family:monospace;font-size:0.85rem;height:90px;">${pkg}</textarea><button class="btn secondary small" id="cp" style="margin-top:8px;">نسخ</button><button class="btn secondary" id="cl" style="margin-top:14px;">إغلاق</button>`;
       document.getElementById("cp").onclick=()=>navigator.clipboard?.writeText(pkg).then(()=>toast("انتسخ")).catch(()=>toast("حدد وانسخ يدوياً")); document.getElementById("cl").onclick=()=>modal.remove();
     } else if(c.stage==="awaiting_a"){
-      inner.innerHTML=`<div class="stagepill">وصل الرد</div><h2>رد ${esc(memberName(c.about))}</h2><p style="background:var(--chip);padding:12px;border-radius:12px;">${esc(c.proposedResolution)}</p><p class="sub">إذا يناسبك، اضغط موافق — وتصير القضية جزء من السجل اللي يشوفه الجميع (بدون كلامك الخاص).</p>
+      inner.innerHTML=`<div class="stagepill">وصل الرد</div><h2>قال المساعد:</h2><div class="bubble ai">${esc(c.proposedResolution)}</div>
+        ${c.noteFromResponder?`<label class="f">ملاحظة من ${esc(memberName(c.about))}</label><p style="background:var(--chip);padding:10px 12px;border-radius:10px;">${esc(c.noteFromResponder)}</p>`:""}
+        <p class="sub">إذا يناسبك، اضغط موافق — وتصير القضية جزء من السجل اللي يشوفه الجميع (بدون كلامك الخاص).</p>
         <button class="btn" id="agreeBtn">أوافق ✅</button><button class="btn secondary" id="notYet" style="margin-top:8px;">مو مقتنع بعد</button>`;
-      document.getElementById("agreeBtn").onclick=()=>{ addPublicComplaint(c.from,c.about,c.title,c.proposedResolution); c.stage="closed"; saveCases(); if(cloud) cloud.pushCase(c); modal.remove(); render(); toast("تم! صارت جزء من السجل."); };
+      document.getElementById("agreeBtn").onclick=()=>{ addPublicComplaint(c.from,c.about,c.title,c.proposedResolution); c.stage="closed"; saveCases(); if(cloud) cloud.pushCase(c); modal.remove(); render();
+        toast("تم! صارت جزء من السجل.");
+        setTimeout(()=>{ if(confirm("تبي تضيفها كقاعدة دائمة للبيت؟ (📜 قواعد متفق عليها)")) addAgreedRule(c.proposedResolution,c.id,c.title); }, 400); };
       document.getElementById("notYet").onclick=()=>{ toast("تقدر تبدأ جولة ثانية إذا تحب."); modal.remove(); };
     } else { inner.innerHTML=`<p>هذي القضية ${stageLabel(c.stage)}.</p><button class="btn secondary" id="cl">إغلاق</button>`; document.getElementById("cl").onclick=()=>modal.remove(); }
   }
@@ -615,7 +729,8 @@ function openReceivedCaseB(caseId){
   if(c.stage==="b_ready") drawSend(); else draw();
   function draw(){
     const inner=document.getElementById("bInner");
-    inner.innerHTML=`<div class="stagepill">رسالة خاصة من ${esc(memberName(c.from))}</div><h2>${esc(c.title)}</h2><p style="background:var(--chip);padding:12px;border-radius:12px;">${esc(c.neutralSummary)}</p>
+    inner.innerHTML=`<div class="stagepill">رسالة خاصة من ${esc(memberName(c.from))}</div><h2>${esc(c.title)}</h2><h2 style="font-size:1rem;color:var(--ink-dim);margin-top:10px;">قال المساعد:</h2><div class="bubble ai">${esc(c.neutralSummary)}</div>
+      ${c.noteFromSender?`<label class="f">ملاحظة من ${esc(memberName(c.from))}</label><p style="background:var(--chip);padding:10px 12px;border-radius:10px;">${esc(c.noteFromSender)}</p>`:""}
       ${c.suggestions.length?`<label class="f">اقتراحات</label><ul>${c.suggestions.map(s=>`<li>${esc(s)}</li>`).join("")}</ul>`:""}
       <p class="sub">هذا خاص بينك وبين المساعد، لين تجهز ردك.</p>${activeFrameworkSummary()?`<p class="footer-note" style="text-align:right;background:var(--chip);padding:8px 10px;border-radius:10px;">${activeFrameworkSummary()}</p>`:""}
       <div class="chatbox" id="chatB">${threadHTML(c.threadB)}</div><textarea id="inputB" placeholder="شنو رأيك؟ اكتب بصراحة."></textarea><button class="btn small secondary" id="sendB" style="margin-top:8px;">أرسل</button><button class="btn" id="finishB" style="margin-top:12px;">جهز ردي النهائي ➜</button>`;
@@ -632,9 +747,12 @@ function openReceivedCaseB(caseId){
   }
   function drawSend(){
     const inner=document.getElementById("bInner");
-    inner.innerHTML=`<div class="stagepill">ردك</div><textarea id="editRes">${esc(c.proposedResolution)}</textarea><button class="btn" id="sendRes" style="margin-top:10px;">${cloud?`إرسال الرد لـ ${esc(memberName(c.from))} ➜`:"جهز الرمز ➜"}</button><button class="btn secondary" id="backB" style="margin-top:8px;">رجوع</button>${cloud?"":`<div id="codeBox"></div>`}`;
+    inner.innerHTML=`<div class="stagepill">ردك</div><h2>قال المساعد:</h2><div class="bubble ai">${esc(c.proposedResolution)}</div>
+      <p class="sub">كلام المساعد ما يتغيّر — أضف ملاحظتك لو فيه شي ناقص أو غير دقيق.</p>
+      <label class="f">ملاحظة منك (اختياري)</label><textarea id="responderNote" placeholder="مثلاً: توضيح، أو تصحيح لشي">${esc(c.noteFromResponder||"")}</textarea>
+      <button class="btn" id="sendRes" style="margin-top:10px;">${cloud?`إرسال الرد لـ ${esc(memberName(c.from))} ➜`:"جهز الرمز ➜"}</button><button class="btn secondary" id="backB" style="margin-top:8px;">رجوع</button>${cloud?"":`<div id="codeBox"></div>`}`;
     document.getElementById("backB").onclick=()=>{ c.stage="received"; saveCases(); draw(); };
-    document.getElementById("sendRes").onclick=()=>{ c.proposedResolution=document.getElementById("editRes").value.trim(); c.stage="b_ready"; saveCases();
+    document.getElementById("sendRes").onclick=()=>{ c.noteFromResponder=document.getElementById("responderNote").value.trim(); c.stage="b_ready"; saveCases();
       if(cloud){ cloud.pushCase(c); modal.remove(); render(); toast(`✅ أُرسل ردك لـ ${memberName(c.from)}`); }
       else { const pkg=buildPackage(c,"toA"); document.getElementById("codeBox").innerHTML=`<label class="f">أرسل هذا الرمز لـ ${esc(memberName(c.from))}</label><textarea readonly style="font-family:monospace;font-size:0.85rem;height:90px;">${pkg}</textarea>`; } };
   }
@@ -643,8 +761,8 @@ function openReceiveCodeModal(){
   const modal=document.createElement("div"); modal.className="modal-bg"; modal.innerHTML=`<div class="card modal"><h2>📩 الصق الرمز</h2><textarea id="recvCode" style="font-family:monospace;font-size:0.85rem;height:90px;"></textarea><button class="btn" id="go" style="margin-top:10px;">فتح</button><button class="btn secondary" id="cl" style="margin-top:8px;">إلغاء</button></div>`; document.body.appendChild(modal);
   document.getElementById("cl").onclick=()=>modal.remove();
   document.getElementById("go").onclick=()=>{ const p=readPackage(document.getElementById("recvCode").value); if(!p) return toast("الرمز ما اشتغل"); modal.remove();
-    if(p.side==="toB"){ cases.push({id:p.id,from:p.from,about:meId,title:p.title,stage:"received",threadA:[],neutralSummary:p.neutralSummary,suggestions:p.suggestions||[],threadB:[],proposedResolution:"",createdAt:Date.now()}); saveCases(); openReceivedCaseB(p.id); }
-    else { let c=findCase(p.id); if(!c){ c={id:p.id,from:meId,about:p.from,title:p.title,stage:"awaiting_a",threadA:[],neutralSummary:p.neutralSummary,suggestions:p.suggestions||[],threadB:[],proposedResolution:p.proposedResolution,createdAt:Date.now()}; cases.push(c); } else { c.proposedResolution=p.proposedResolution; c.stage="awaiting_a"; } saveCases(); openCaseModal(c.id); } };
+    if(p.side==="toB"){ cases.push({id:p.id,from:p.from,about:meId,title:p.title,stage:"received",threadA:[],neutralSummary:p.neutralSummary,suggestions:p.suggestions||[],threadB:[],proposedResolution:"",noteFromSender:p.noteFromSender||"",noteFromResponder:"",createdAt:Date.now()}); saveCases(); openReceivedCaseB(p.id); }
+    else { let c=findCase(p.id); if(!c){ c={id:p.id,from:meId,about:p.from,title:p.title,stage:"awaiting_a",threadA:[],neutralSummary:p.neutralSummary,suggestions:p.suggestions||[],threadB:[],proposedResolution:p.proposedResolution,noteFromSender:"",noteFromResponder:p.noteFromResponder||"",createdAt:Date.now()}; cases.push(c); } else { c.proposedResolution=p.proposedResolution; c.noteFromResponder=p.noteFromResponder||""; c.stage="awaiting_a"; } saveCases(); openCaseModal(c.id); } };
 }
 
 // ================= BIND =================
@@ -656,6 +774,9 @@ function bindView(){
   document.querySelectorAll("[data-toggle-restock]").forEach(b=>b.onclick=()=>toggleRestock(b.dataset.toggleRestock));
   document.querySelectorAll("[data-del-restock]").forEach(b=>b.onclick=()=>deleteRestock(b.dataset.delRestock));
   document.querySelectorAll("[data-del-complaint]").forEach(b=>b.onclick=()=>{ if(confirm("حذف من السجل؟")) deleteComplaint(b.dataset.delComplaint); });
+  document.querySelectorAll("[data-del-rule]").forEach(b=>b.onclick=()=>{ if(confirm("حذف القاعدة؟")) deleteAgreedRule(b.dataset.delRule); });
+  document.querySelectorAll("[data-confirm-kudos]").forEach(b=>b.onclick=()=>toggleKudosConfirm(b.dataset.confirmKudos));
+  document.querySelectorAll("[data-del-kudos]").forEach(b=>b.onclick=()=>{ if(confirm("حذف؟")) deleteKudos(b.dataset.delKudos); });
   document.querySelectorAll("[data-cal]").forEach(d=>d.onclick=()=>{ calSelected=calSelected===d.dataset.cal?null:d.dataset.cal; render(); });
   document.querySelectorAll("[data-cal-nav]").forEach(b=>b.onclick=()=>{ calMonth.m+=parseInt(b.dataset.calNav); if(calMonth.m<0){calMonth.m=11;calMonth.y--;} if(calMonth.m>11){calMonth.m=0;calMonth.y++;} calSelected=null; render(); });
   document.querySelectorAll("[data-open-case]").forEach(b=>b.onclick=()=>openCaseModal(b.dataset.openCase));
@@ -668,13 +789,25 @@ function bindView(){
     document.querySelectorAll("[data-day]").forEach(b=>b.onclick=()=>{ const d=parseInt(b.dataset.day); pendingDays=pendingDays.includes(d)?pendingDays.filter(x=>x!==d):[...pendingDays,d]; b.classList.toggle("sel"); });
     $("addChoreBtn").onclick=()=>{ const t=$("newChoreTitle").value.trim(); if(!t) return toast("اكتب اسم المهمة أول."); if(pendingFreq==="days"&&!pendingDays.length) return toast("اختر يوم واحد على الأقل."); addChore(t,$("newChoreAssignee").value,pendingFreq,pendingDays); pendingFreq="daily"; pendingDays=[]; };
   }
+  if(currentView==="today"){ const ak=$("addKudosBtn"); if(ak) ak.onclick=()=>{ const v=$("kudosInput").value.trim(); if(!v) return toast("اكتب وش سويت أول."); addKudos(v); }; }
   if(currentView==="restock"){ $("addRestockBtn").onclick=()=>{ const n=$("rName").value.trim(); if(!n) return toast("اكتب اسم الشي أول."); addRestock(n,$("rQty").value.trim(),$("rPrice").value.trim(),$("rNote").value.trim()); }; }
   if(currentView==="complaints"){ $("startCaseBtn").onclick=()=>{ const c=newCase(state.settings.members.find(m=>m.id!==meId).id,""); openCaseModal(c.id); }; const rc=$("receiveCaseBtn"); if(rc) rc.onclick=openReceiveCodeModal; }
   if(currentView==="more"){
     const sw=$("switchUserBtn"); if(sw) sw.onclick=()=>{ meId=null; try{localStorage.removeItem(LS_ME);}catch(e){} render(); };
     if(settingsView==="profile"){ $("saveProfileBtn").onclick=()=>{ const p={}; document.querySelectorAll(".profInput").forEach(t=>p[t.dataset.key]=t.value.trim()); state.settings.profiles[meId]=p; pushSettings(); toast("انحفظت بطاقتك."); settingsView=null; render(); }; }
     if(settingsView==="family"){ $("saveNamesBtn").onclick=()=>{ document.querySelectorAll(".renameInput").forEach(i=>{ const m=state.settings.members.find(x=>x.id===i.dataset.id); if(m) m.name=i.value.trim()||m.name; }); pushSettings(); toast("انحفظت."); render(); }; }
-    if(settingsView==="cloud"){ $("saveFamilyBtn").onclick=()=>{ const v=$("familyCodeInput").value.trim(); if(v.length<8) return toast("خلّ الرمز ٨ أحرف على الأقل."); lsSet(LS_FAMILY,v); toast("انحفظ. جاري الاتصال…"); location.reload(); }; }
+    if(settingsView==="cloud"){
+      $("saveFamilyBtn").onclick=()=>{ const v=$("familyCodeInput").value.trim(); if(v.length<8) return toast("خلّ الرمز ٨ أحرف على الأقل."); lsSet(LS_FAMILY,v); toast("انحفظ. جاري الاتصال…"); location.reload(); };
+      const sq=$("showQrBtn"); if(sq) sq.onclick=()=>{ const box=$("qrBox"); if(box.style.display==="none"){ box.innerHTML=qrSVG(getFamilyCode()); box.style.display="block"; } else box.style.display="none"; };
+      const scq=$("scanQrBtn"); if(scq) scq.onclick=()=>{ openQrScanModal((val,err)=>{
+        if(!val){ $("scanErrBox").textContent="ما قدرنا نفتح الكاميرا. جرّب الإدخال اليدوي تحت."; return; }
+        if(val.trim().length<8){ $("scanErrBox").textContent="الرمز المقروء قصير جداً — جرّب مرة ثانية."; return; }
+        lsSet(LS_FAMILY,val.trim()); toast("انحفظ. جاري الاتصال…"); location.reload(); }); };
+    }
+    if(settingsView==="notify"){
+      const en=$("enableNotifyBtn"); if(en) en.onclick=async()=>{ $("notifyMsg").textContent="جاري التفعيل…"; const r=await subscribeToPush(); $("notifyMsg").textContent=r.ok?"":("⚠️ "+r.reason); if(r.ok){ toast("✅ تفعّلت التنبيهات."); render(); } };
+      const dn=$("disableNotifyBtn"); if(dn) dn.onclick=async()=>{ await unsubscribeFromPush(); render(); };
+    }
     if(settingsView==="ai"){
       $("testAiBtn").onclick=async()=>{ $("testAiOut").textContent="جاري الاختبار…"; const r=await callAI("رد بكلمة واحدة فقط: جاهز", [{role:"user",content:"اختبار"}]); $("testAiOut").innerHTML=r.ok?`<span class="badge-ok">✅ المساعد يشتغل — رد: ${esc(r.text)}</span>`:`<span class="badge-err">❌ ${esc(r.reason)}</span>`; };
       const sk=$("saveKeyBtn"); if(sk) sk.onclick=()=>{ const v=$("apiKeyInput").value.trim(); if(!v) return toast("الصق المفتاح أول."); const share=$("shareKeyCheck")?$("shareKeyCheck").checked:false; if(share&&cloud){ state.settings.aiKey=v; pushSettings(); lsSet(LS_KEY,""); toast("انحفظ ومُشارك مع العائلة."); } else { lsSet(LS_KEY,v); toast("انحفظ على هذا الجوال."); } render(); };
