@@ -431,25 +431,38 @@ function freqLabel(c){ return c.freq==="daily"||c.freq==="weekly"?"كل يوم":
 // Only scheduled chores can be "missed" — a one-off or an as-needed job has no
 // day it was supposed to happen on, so counting misses for them is meaningless.
 function nudgeable(c){ return c.freq==="daily"||c.freq==="weekly"||c.freq==="days"; }
+// The day a chore started counting. A chore cannot have been missed before it
+// existed — without this, one added today reads as missed on every earlier day
+// of the window and can trip the nudge the moment it is created.
+function choreStartDate(c){
+  if(c.createdAt) return localDate(new Date(c.createdAt));
+  const ds=Object.keys(c.log||{}).sort();
+  return ds.length?ds[0]:todayStr();   // unknown age: treat as new rather than accuse retroactively
+}
+function wasDue(c, ds){ return ds>=choreStartDate(c) && isDueToday(c,ds); }
 function missedRecord(c, days){
-  const t=todayStr(); let due=0, done=0; const missedDates=[];
-  for(let i=1;i<=(days||NUDGE_WINDOW);i++){ const ds=addDays(t,-i);   // from yesterday: today isn't missed yet
+  const t=todayStr(), win=days||NUDGE_WINDOW, born=choreStartDate(c);
+  let due=0, done=0, span=0; const missedDates=[];
+  for(let i=1;i<=win;i++){ const ds=addDays(t,-i);   // from yesterday: today isn't missed yet
+    if(ds<born) continue;
+    span++;
     if(!isDueToday(c,ds)) continue;
     due++;
     if(c.log&&c.log[ds]) done++; else missedDates.push(ds);
   }
-  return {due, done, missed:missedDates.length, missedDates};
+  return {due, done, span, missed:missedDates.length, missedDates, youngerThanWindow:span<win};
 }
 function choreFactsText(c){
   const r=missedRecord(c);
   return `المهمة: ${c.title}\nالمسؤول: ${c.assignee==="anyone"?"أي أحد":memberName(c.assignee)}\nالتكرار: ${freqLabel(c)}\n`+
-    `آخر ${NUDGE_WINDOW} يوم: مطلوبة ${r.due} مرة، انسوت ${r.done} مرة، ما انسوت ${r.missed} مرة`;
+    `${r.youngerThanWindow?`منذ إضافة المهمة قبل ${r.span} يوم`:`آخر ${NUDGE_WINDOW} يوم`}: مطلوبة ${r.due} مرة، انسوت ${r.done} مرة، ما انسوت ${r.missed} مرة\n`+
+    `(لا تحسب أي يوم قبل إضافة المهمة)`;
 }
 // Arabic counts its plurals differently at 1, 2, 3-10 and 11+; getting it wrong
 // reads as broken to a native speaker, which matters on a screen aimed at one.
 function timesAr(n){ return n===1?"مرة":n===2?"مرتين":(n>=3&&n<=10)?`${ar(n)} مرات`:`${ar(n)} مرة`; }
 function choreFactsLine(c){ const r=missedRecord(c);
-  return `ما انسوت ${timesAr(r.missed)} من أصل ${ar(r.due)} خلال ${ar(NUDGE_WINDOW)} يوم`; }
+  return `ما انسوت ${timesAr(r.missed)} من أصل ${ar(r.due)} ${r.youngerThanWindow?"منذ إضافتها":`خلال ${ar(NUDGE_WINDOW)} يوم`}`; }
 function nudgeSnoozed(id){ const sn=loadJSON(LS_NUDGESNOOZE,{}); return (sn[id]||0)>Date.now(); }
 function snoozeNudge(id){ const sn=loadJSON(LS_NUDGESNOOZE,{}); sn[id]=Date.now()+NUDGE_SNOOZE_DAYS*86400000; saveJSON(LS_NUDGESNOOZE,sn); }
 // Only ever computed for the person themselves — this list is never shown to anyone else.
@@ -720,8 +733,8 @@ function renderChores(){
 function dayDetailHTML(ds){
   const t=todayStr(), past=ds<=t;
   const doneBy=(id)=>state.chores.filter(c=>c.log&&c.log[ds]&&c.log[ds].by===id);
-  const missedBy=(id)=>past?state.chores.filter(c=>c.assignee===id&&isDueToday(c,ds)&&!(c.log&&c.log[ds])):[];
-  const openAnyone=past?state.chores.filter(c=>c.assignee==="anyone"&&isDueToday(c,ds)&&!(c.log&&c.log[ds])):[];
+  const missedBy=(id)=>past?state.chores.filter(c=>c.assignee===id&&wasDue(c,ds)&&!(c.log&&c.log[ds])):[];
+  const openAnyone=past?state.chores.filter(c=>c.assignee==="anyone"&&wasDue(c,ds)&&!(c.log&&c.log[ds])):[];
   const doneBtn=(c)=>isMine(c)?` <button class="btn small secondary" data-toggle-chore="${c.id}" data-date="${ds}" style="padding:4px 10px;min-height:30px;">سويتها</button>`:"";
   const blocks=state.settings.members.map(m=>{
     const done=doneBy(m.id), missed=missedBy(m.id);
