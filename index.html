@@ -1263,6 +1263,7 @@ function bindView(){
             (j.ignoredNotFree&&j.ignoredNotFree.length?`\n\n⚠️ انتُبذت لأنها مو مجانية:\n${j.ignoredNotFree.join("\n")}`:"");
           // Whether OpenRouter recognises the key Netlify is actually holding —
           // distinguishes a real rate limit from a key mix-up.
+          if(j.warnings&&j.warnings.length) cfg+=`\n\n⚠️ تنبيهات الإعدادات:\n- ${j.warnings.join("\n- ")}`;
           if(j.keyInfo) cfg+=j.keyInfo.error
             ? `\n\n⚠️ المفتاح: ${j.keyInfo.error}`
             : `\n\nالمفتاح شغّال ✅`+

@@ -118,12 +118,26 @@ exports.handler = async (event) => {
     }
     // Reports the live configuration so a failure can be diagnosed from the app
     // itself, without a redeploy or a look at the Netlify logs.
+    // Config that looks set but does nothing. Granting a model permission via
+    // EXTRA_ALLOWED_MODELS without also naming it in TEXT_MODELS is the obvious
+    // trap: the diagnostic shows the slug, so it reads as done, while nothing
+    // ever calls it.
+    const warnings = [];
+    for (const m of EXTRA_ALLOWED_MODELS) {
+      if (!text.use.includes(m) && !vision.use.includes(m)) {
+        warnings.push(`"${m}" is allowlisted but is in neither TEXT_MODELS nor VISION_MODELS, so it is never called. Add it to TEXT_MODELS (last, if it is a paid fallback).`);
+      }
+    }
+    if (!process.env.TEXT_MODELS) warnings.push("TEXT_MODELS is not set; using the built-in default. Note that env var changes only take effect after a redeploy.");
+    if (text.use.length === 1) warnings.push("Only one text model is configured, so a rate limit on it has nothing to fall back to.");
+
     return {
       statusCode: key ? 200 : 503,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         ok: !!key,
         error: key ? undefined : "AI_API_KEY not set on server",
+        warnings,
         textModels: text.use, visionModels: vision.use,
         ignoredNotFree: [...new Set([...text.rejected, ...vision.rejected])],
         extraAllowed: EXTRA_ALLOWED_MODELS,
